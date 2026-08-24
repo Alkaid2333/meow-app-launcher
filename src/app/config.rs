@@ -3,7 +3,7 @@
 //! 配置文件生成在 `./.datas/config.json` 喵,首次启动自动创建默认配置喵。
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::Path;
 
 /// 数据目录名: 配置、应用注册、图标快照都放这里喵
 pub const DATA_DIR_NAME: &str = ".datas";
@@ -139,6 +139,7 @@ impl Default for SearchConfig {
 
 /// 全局配置喵
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct AppConfig {
     /// 全局热键喵
     pub hotkey: HotkeyConfig,
@@ -150,20 +151,10 @@ pub struct AppConfig {
     pub search: SearchConfig,
 }
 
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            hotkey: HotkeyConfig::default(),
-            window: WindowConfig::default(),
-            theme: ThemeConfig::default(),
-            search: SearchConfig::default(),
-        }
-    }
-}
 
 impl AppConfig {
     /// 加载配置喵,文件不存在或解析失败时生成默认配置喵~
-    pub fn load(data_dir: &PathBuf) -> Self {
+    pub fn load(data_dir: &Path) -> Self {
         let path = data_dir.join(CONFIG_FILE_NAME);
         match std::fs::read_to_string(&path) {
             Ok(raw) => match serde_json::from_str::<AppConfig>(&raw) {
@@ -184,7 +175,7 @@ impl AppConfig {
     }
 
     /// 保存配置到磁盘喵,保存失败只记日志不崩溃喵~
-    pub fn save(&self, data_dir: &PathBuf) {
+    pub fn save(&self, data_dir: &Path) {
         let path = data_dir.join(CONFIG_FILE_NAME);
         match serde_json::to_string_pretty(self) {
             Ok(raw) => match std::fs::write(&path, raw) {

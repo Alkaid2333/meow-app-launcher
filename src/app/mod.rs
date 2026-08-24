@@ -1,25 +1,20 @@
 //! 应用级状态与生命周期喵~
 //!
-//! AppState 是全局唯一状态,作为 GPUI Global 挂载喵。
-//! 包含: 配置、应用注册表、搜索引擎、图标管理器、平台句柄喵。
+//! `AppState` 是应用唯一的状态中枢,由窗口层(单线程消息循环)持有喵。
+//! 包含: 配置、应用注册表、搜索引擎、图标管理器、平台句柄,
+//! 以及搜索交互的瞬时状态(查询/结果/选中)喵。
+//!
+//! 与上一版(GPUI)相比: 不再挂载为 `Global`,而是普通结构;
+//! 状态更新全部发生在单线程内,天然避免跨线程同步问题喵。
 
-pub mod actions;
 pub mod config;
 
 use crate::apps::{AppInfo, AppRegistry, icon::IconManager};
-use crate::platform::PlatformCapabilities;
-use crate::search::SearchEngine;
 use crate::app::config::AppConfig;
-use gpui::Global;
+use crate::platform::Platform;
+use crate::search::SearchEngine;
 use std::path::PathBuf;
 use std::sync::Arc;
-
-/// 搜索结果条目喵(供选择窗口渲染)喵
-#[derive(Clone)]
-pub struct ResultEntry {
-    pub app: AppInfo,
-    pub icon: Option<PathBuf>,
-}
 
 /// 全局应用状态喵
 pub struct AppState {
@@ -34,24 +29,21 @@ pub struct AppState {
     /// 图标管理器喵
     pub icons: IconManager,
     /// 平台能力句柄喵
-    pub platform: Arc<dyn PlatformCapabilities>,
-    // ---------- 搜索交互状态(双窗口共享)喵 ----------
+    pub platform: Arc<dyn Platform>,
+
+    // ---------- 搜索交互状态喵 ----------
     /// 当前查询喵
     pub query: String,
-    /// 搜索结果喵
-    pub results: Vec<ResultEntry>,
+    /// 搜索结果(按分数降序)喵
+    pub results: Vec<AppInfo>,
     /// 选中索引喵
     pub selected: usize,
-    /// 选择窗口是否可见喵
+    /// 是否有结果需要展开面板喵
     pub results_visible: bool,
-    /// 搜索框窗口位置 (x, y, w, h),供选择窗口对齐喵
-    pub searchbar_bounds: Option<(f32, f32, f32, f32)>,
 }
 
-impl Global for AppState {}
-
 impl AppState {
-    /// 初始化全局状态喵,并把数据落到磁盘喵
+    /// 初始化应用状态喵,并确保数据目录存在喵~
     pub fn new(data_dir: PathBuf) -> Self {
         // 确保数据目录存在喵
         if let Err(e) = std::fs::create_dir_all(&data_dir) {
@@ -82,7 +74,6 @@ impl AppState {
             results: Vec::new(),
             selected: 0,
             results_visible: false,
-            searchbar_bounds: None,
         }
     }
 
@@ -92,13 +83,13 @@ impl AppState {
         self.registry.save(&self.data_dir);
     }
 
-    /// 重新扫描系统应用并合并进注册表喵
-    pub fn rescan_apps(&mut self) {
-        let scanned = crate::apps::scanner::scan_installed_apps();
+    /// 合并后台扫描结果进注册表喵(由主线程在收到异步扫描结果后调用)喵
+    pub fn merge_scanned(&mut self, scanned: Vec<AppInfo>) -> usize {
         let added = self.registry.merge_scanned(scanned);
         self.search.sync(&self.registry.apps);
         self.persist();
         log::info!("应用扫描完成,新增 {added} 个喵");
+        added
     }
 
     /// 记录一次应用启动喵(次数 + 最近时间)喵
@@ -113,7 +104,7 @@ impl AppState {
         self.persist();
     }
 
-    /// 清空搜索状态喵(隐藏窗口 / 启动应用后调用,避免选择窗被重新拉出来)喵
+    /// 清空搜索状态喵(隐藏窗口 / 启动应用后调用,避免面板残留)喵
     pub fn reset_search(&mut self) {
         self.query.clear();
         self.results.clear();
@@ -122,34 +113,35 @@ impl AppState {
     }
 
     /// 根据当前查询重新计算搜索结果喵(更新 results/results_visible/selected)喵
-    pub fn refresh_results(&mut self) {
+    ///
+    /// 返回结果数量,便于调用方判断是否需要展开面板喵。
+    pub fn refresh_results(&mut self) -> usize {
         let q = self.query.trim();
         if q.is_empty() {
             self.results.clear();
             self.results_visible = false;
             self.selected = 0;
-            return;
+            return 0;
         }
-        let apps = self.search.search(&self.registry, q);
-        let mut results = Vec::with_capacity(apps.len());
-        for app in apps {
-            let icon = self.icons.icon_path(app);
-            results.push(ResultEntry {
-                app: app.clone(),
-                icon,
-            });
-        }
-        self.results = results;
+        // 搜索结果按分数降序,克隆为自有数据喵
+        self.results = self
+            .search
+            .search(&self.registry, q)
+            .into_iter()
+            .cloned()
+            .collect();
         self.results_visible = !self.results.is_empty();
         self.selected = 0;
+        self.results.len()
     }
 
-    /// 启动当前选中的应用喵,返回是否成功喵
-    pub fn launch_selected(&self) -> Option<String> {
-        let app = self.results.get(self.selected).map(|r| r.app.clone())?;
+    /// 启动当前选中的应用喵,返回成功启动的应用名喵~
+    pub fn launch_selected(&mut self) -> Option<String> {
+        let app = self.results.get(self.selected)?.clone();
         let launched = self.platform.launch(&app.path);
         if launched {
             log::info!("启动应用: {} ({}) 喵", app.name, app.path);
+            self.record_launch(&app.name);
             Some(app.name)
         } else {
             None

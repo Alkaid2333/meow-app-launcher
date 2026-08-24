@@ -1,6 +1,6 @@
 [package]
 name = "meow-app-launcher"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "喵喵应用启动器 - 类 macOS 聚焦搜索的跨平台高性能应用启动器喵"
 license = "MIT"
@@ -10,19 +10,18 @@ name = "meowal"
 path = "src/main.rs"
 
 [dependencies]
-gpui = "0.2.2"
-gpui-component = "0.5.1"
-gpui-component-assets = "0.5.1"
+# Skia 图形库的安全 Rust 绑定喵(Google Skia 官方图形引擎)
+# binary-cache: 下载预编译二进制; embed-icudtl: 内嵌 ICU 数据(中文渲染无需外部文件)
+skia-safe = "0.99"
 logforth = { version = "0.30.1", features = ["starter-log"] }
 colored = "3.1"
 jiff = "0.2"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time"] }
 log = "0.4.27"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 pinyin = "0.10"
-png = "0.17"
-dirs = "6.0"
+# 异步运行时: 把应用扫描、图标提取等慢操作放到阻塞线程池,不阻塞 UI 消息循环喵
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
@@ -35,9 +34,10 @@ windows-sys = { version = "0.59", features = [
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
     "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
     "Win32_System_Threading",
+    "Win32_System_LibraryLoader",
 ] }
-raw-window-handle = "0.6"
 
 [profile.dev]
 opt-level = 1
