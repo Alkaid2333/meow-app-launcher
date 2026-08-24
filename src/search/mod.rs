@@ -190,18 +190,16 @@ impl SearchEngine {
                 }
                 // 2. 全拼匹配喵
                 let full = self.pinyin.get_full(&app.name).to_lowercase();
-                if !full.is_empty() {
-                    if let Some(m) = fuzzy::fuzzy_match(&q, &full) {
+                if !full.is_empty()
+                    && let Some(m) = fuzzy::fuzzy_match(&q, &full) {
                         best = best.max(m.score);
                     }
-                }
                 // 3. 首字母匹配喵
                 let initials = self.pinyin.get_initials(&app.name).to_lowercase();
-                if !initials.is_empty() && !q.is_empty() {
-                    if let Some(m) = fuzzy::fuzzy_match(&q, &initials) {
+                if !initials.is_empty() && !q.is_empty()
+                    && let Some(m) = fuzzy::fuzzy_match(&q, &initials) {
                         best = best.max(m.score);
                     }
-                }
 
                 if best > 0.0 {
                     Some(best)
@@ -290,7 +288,7 @@ mod tests {
     #[test]
     fn search_by_english_name() {
         let reg = make_registry();
-        let mut engine = SearchEngine::new();
+        let engine = SearchEngine::new();
         let results = engine.search(&reg, "fire");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "Firefox");

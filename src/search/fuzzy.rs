@@ -42,11 +42,10 @@ pub fn fuzzy_match(query: &str, target: &str) -> Option<MatchResult> {
         if qi < query.len() && tc == query[qi] {
             matches.push(ti);
             // 连续匹配奖励: 紧挨着上一个命中,分数高喵
-            if let Some(prev) = last_match_idx {
-                if ti == prev + 1 {
+            if let Some(prev) = last_match_idx
+                && ti == prev + 1 {
                     score += 3.0;
                 }
-            }
             // 开头匹配奖励: 命中越靠前越好喵
             if ti < 3 {
                 score += 2.0;

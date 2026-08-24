@@ -8,7 +8,7 @@ pub mod scanner;
 
 use crate::app::config::APPS_FILE_NAME;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::Path;
 
 /// 应用来源喵
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,7 +83,7 @@ pub struct AppRegistry {
 #[allow(dead_code)] // 注册表操作 API 供 CLI/配置 GUI 使用(第二阶段)喵
 impl AppRegistry {
     /// 从磁盘加载应用注册表喵,失败则空表喵~
-    pub fn load(data_dir: &PathBuf) -> Self {
+    pub fn load(data_dir: &Path) -> Self {
         let path = data_dir.join(APPS_FILE_NAME);
         match std::fs::read_to_string(&path) {
             Ok(raw) => match serde_json::from_str::<AppRegistry>(&raw) {
@@ -104,7 +104,7 @@ impl AppRegistry {
     }
 
     /// 保存应用注册表到磁盘喵~
-    pub fn save(&self, data_dir: &PathBuf) {
+    pub fn save(&self, data_dir: &Path) {
         let path = data_dir.join(APPS_FILE_NAME);
         match serde_json::to_string_pretty(self) {
             Ok(raw) => match std::fs::write(&path, raw) {
@@ -169,7 +169,7 @@ impl AppRegistry {
             .iter()
             .filter(|a| a.last_used > 0)
             .collect();
-        apps.sort_by(|a, b| b.last_used.cmp(&a.last_used));
+        apps.sort_by_key(|a| std::cmp::Reverse(a.last_used));
         apps.truncate(n);
         apps
     }
@@ -177,7 +177,7 @@ impl AppRegistry {
     /// 最常用的应用(按次数倒序,最多 n 个)喵
     pub fn frequent(&self, n: usize) -> Vec<&AppInfo> {
         let mut apps: Vec<&AppInfo> = self.apps.iter().filter(|a| a.launch_count > 0).collect();
-        apps.sort_by(|a, b| b.launch_count.cmp(&a.launch_count));
+        apps.sort_by_key(|a| std::cmp::Reverse(a.launch_count));
         apps.truncate(n);
         apps
     }
@@ -193,11 +193,10 @@ impl AppRegistry {
                     continue;
                 }
                 // 路径变了就更新,保留用户附加信息喵
-                if existing.path != app.path {
-                    if let Some(slot) = self.apps.iter_mut().find(|a| a.name == app.name) {
+                if existing.path != app.path
+                    && let Some(slot) = self.apps.iter_mut().find(|a| a.name == app.name) {
                         slot.path = app.path;
                     }
-                }
             } else {
                 self.apps.push(app);
                 added += 1;

@@ -15,7 +15,7 @@ use logforth::filter::FilterResult;
 use logforth::record::{FilterCriteria, Level, Record};
 use logforth::{Diagnostic, Error, Filter, Layout};
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// 日志目录名(相对数据目录)喵
 const LOG_DIR_NAME: &str = "logs";
@@ -32,7 +32,7 @@ const ROLL_KEEP: usize = 3;
 ///
 /// * `data_dir` - 数据目录(日志文件放 data_dir/logs/)喵
 /// * `verbose` - 是否输出 debug 级别日志喵
-pub fn init(data_dir: &PathBuf, verbose: bool) {
+pub fn init(data_dir: &Path, verbose: bool) {
     let logs_dir = data_dir.join(LOG_DIR_NAME);
     if let Err(e) = std::fs::create_dir_all(&logs_dir) {
         eprintln!("创建日志目录失败: {e}");

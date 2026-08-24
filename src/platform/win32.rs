@@ -1,20 +1,40 @@
 //! Windows 平台实现喵~
 //!
 //! 通过 windows-sys 直接调用 Win32 API 喵。
-//! 提供: 图标提取、应用启动、全局热键、窗口显示/隐藏喵。
+//! 提供: 异形透明窗口、每像素透明呈现、消息泵、全局热键、图标提取、应用启动喵。
 //!
 //! 注意: windows-sys 0.59 的 HWND 是 `*mut c_void` 类型别名,
 //! 不是 tuple struct,所以直接用指针、跨线程存储时转 usize 喵。
 
-use super::{IconPixels, PlatformCapabilities};
+use super::{IconPixels, Key, Platform, PlatformWindow, WindowEvent, WindowHandler, WindowSpec};
+use std::cell::RefCell;
 use std::mem::{size_of, zeroed};
 use std::ptr::null_mut;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 
-use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 
 /// 注册热键的 id 喵
 const HOTKEY_ID: i32 = 0x4D4F; // "MO" 喵
+/// 热键线程 → 主窗口的自定义消息(WM_APP + 1)喵
+const WM_MEOW_HOTKEY: u32 = 0x8000 + 1;
+/// 动画定时器 id 喵
+const TIMER_ID: usize = 1;
+/// 窗口类名(UTF-16 编码,含 null 终止)喵
+const CLASS_NAME: [u16; 19] = [
+    0x4D, 0x65, 0x6F, 0x77, // "Meow"
+    0x4C, 0x61, 0x75, 0x6E, 0x63, 0x68, 0x65, 0x72, // "Launcher"
+    0x57, 0x69, 0x6E, 0x64, 0x6F, 0x77, // "Window"
+    0x00, // null 终止喵
+];
+
+/// 全局窗口类注册锁喵(整个进程只注册一次)喵
+static CLASS_ONCE: Once = Once::new();
+
+// 当前消息循环的事件处理器喵(单线程,用 thread_local 传给 WndProc)喵
+thread_local! {
+    static HANDLER: RefCell<Option<*mut dyn WindowHandler>> = const { RefCell::new(None) };
+}
 
 /// Windows 平台句柄喵
 pub struct Win32Platform {
@@ -24,13 +44,15 @@ pub struct Win32Platform {
 
 impl Win32Platform {
     pub fn new() -> Self {
+        // 声明进程 DPI 感知,窗口尺寸/鼠标坐标都按物理像素处理喵
+        enable_dpi_awareness();
         Self {
             hotkey_hwnd: Arc::new(Mutex::new(None)),
         }
     }
 }
 
-impl PlatformCapabilities for Win32Platform {
+impl Platform for Win32Platform {
     fn extract_icon_pixels(&self, path: &str) -> Option<IconPixels> {
         extract_icon_pixels_impl(path)
     }
@@ -43,7 +65,7 @@ impl PlatformCapabilities for Win32Platform {
         &self,
         modifiers: &str,
         key: &str,
-        on_trigger: Box<dyn Fn() + Send + 'static>,
+        target: PlatformWindow,
     ) -> bool {
         let (mods, vk) = match parse_hotkey(modifiers, key) {
             Some(v) => v,
@@ -56,11 +78,12 @@ impl PlatformCapabilities for Win32Platform {
         // 先取消旧的,再注册新的喵
         self.unregister_global_hotkey();
 
+        let target_hwnd = target.hwnd();
         let hwnd_holder = self.hotkey_hwnd.clone();
         let spawned = std::thread::Builder::new()
             .name("meow-hotkey".into())
             .spawn(move || {
-                hotkey_message_loop(mods, vk, on_trigger, hwnd_holder);
+                hotkey_message_loop(mods, vk, target_hwnd, hwnd_holder);
             });
 
         match spawned {
@@ -91,115 +114,371 @@ impl PlatformCapabilities for Win32Platform {
         }
     }
 
-    fn set_always_on_top(&self, on: bool) {
-        // 窗口置顶由 GPUI 窗口创建时配置,运行时切换待第二阶段喵
-        log::debug!("set_always_on_top({on}) 由窗口创建时配置喵");
+    fn create_window(&self, spec: &WindowSpec) -> Option<PlatformWindow> {
+        // 确保窗口类已注册喵
+        CLASS_ONCE.call_once(|| {
+            register_class();
+        });
+
+        unsafe {
+            let hwnd = windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+                // 分层(per-pixel alpha) + 置顶 + 不进任务栏喵
+                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                CLASS_NAME.as_ptr(),
+                CLASS_NAME.as_ptr(),
+                WS_POPUP,
+                spec.x,
+                spec.y,
+                spec.width,
+                spec.height,
+                null_mut(),
+                null_mut(),
+                windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(null_mut()),
+                null_mut(),
+            );
+            if hwnd.is_null() {
+                log::error!("创建窗口失败喵");
+                None
+            } else {
+                log::debug!("窗口创建成功: hwnd={} 喵", hwnd as usize);
+                Some(PlatformWindow::from_hwnd(hwnd as usize))
+            }
+        }
+    }
+
+    fn destroy_window(&self, window: &PlatformWindow) {
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(window.hwnd() as HWND);
+        }
+    }
+
+    fn show_window(&self, window: &PlatformWindow, show: bool) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOW};
+        unsafe {
+            ShowWindow(window.hwnd() as HWND, if show { SW_SHOW } else { SW_HIDE });
+        }
+    }
+
+    fn resize_window(&self, window: &PlatformWindow, width: i32, height: i32) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, HWND_TOPMOST, SWP_NOMOVE,
+        };
+        unsafe {
+            SetWindowPos(
+                window.hwnd() as HWND,
+                HWND_TOPMOST,
+                0,
+                0,
+                width,
+                height,
+                SWP_NOMOVE,
+            );
+        }
+    }
+
+    fn present(&self, window: &PlatformWindow, width: i32, height: i32, bgra: &[u8]) {
+        present_impl(window.hwnd() as HWND, width, height, bgra);
+    }
+
+    fn set_timer(&self, window: &PlatformWindow, interval_ms: u32) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::SetTimer;
+        unsafe {
+            SetTimer(window.hwnd() as HWND, TIMER_ID, interval_ms, None);
+        }
+    }
+
+    fn kill_timer(&self, window: &PlatformWindow) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::KillTimer;
+        unsafe {
+            KillTimer(window.hwnd() as HWND, TIMER_ID);
+        }
+    }
+
+    fn run_message_loop(&self, _window: &PlatformWindow, handler: &mut dyn WindowHandler) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, GetMessageW, TranslateMessage, MSG,
+        };
+
+        // 安全性: 消息循环阻塞运行直至退出,handler 在整个循环期间始终有效;
+        // 且单线程运行,无数据竞争。此处把引用生命周期延长为 'static 仅供
+        // WndProc 回调使用,循环结束立即清空喵。
+        let handler: &'static mut dyn WindowHandler =
+            unsafe { std::mem::transmute(handler) };
+
+        // 把 handler 指针存到 thread_local,供 WndProc 回调喵
+        HANDLER.with(|slot| {
+            *slot.borrow_mut() = Some(handler as *mut dyn WindowHandler);
+        });
+
+        let mut msg: MSG = unsafe { zeroed() };
+        // 消息泵: GetMessageW 返回 0 表示收到 WM_QUIT,退出喵
+        while unsafe { GetMessageW(&mut msg, null_mut(), 0, 0) } > 0 {
+            unsafe {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+
+        // 清空 handler 指针喵
+        HANDLER.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+        log::debug!("消息循环退出喵");
+    }
+
+    fn scale_factor(&self) -> f32 {
+        unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForSystem() as f32 / 96.0 }
+    }
+
+    fn screen_size(&self) -> (i32, i32) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+        unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
     }
 
     fn platform_name(&self) -> &'static str {
         "windows"
     }
+}
 
-    fn window_hwnd(&self, window: &gpui::Window) -> Option<usize> {
-        use raw_window_handle::HasWindowHandle;
-        let handle = HasWindowHandle::window_handle(window).ok()?;
-        let raw_window_handle::RawWindowHandle::Win32(win32) = handle.as_raw() else {
-            return None;
-        };
-        Some(win32.hwnd.get() as usize)
-    }
+// ---------------------------------------------------------------------------
+// 窗口过程: 把 WM_* 消息翻译成平台无关事件喵
+// ---------------------------------------------------------------------------
 
-    fn set_visible_hwnd(&self, hwnd: usize, visible: bool, activate: bool) -> bool {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-            HWND_TOPMOST, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-            SWP_SHOWWINDOW, SetWindowPos, ShowWindow,
-        };
-        let hwnd = hwnd as HWND;
-        unsafe {
-            if visible {
-                // 自绘窗口关键: 关掉 DWM 给这个无边框窗口画的那一圈非客户区边框 + 阴影
-                // (1) DwmExtendFrameIntoClientArea(-1) 把 frame 扩到整个客户区,配合
-                //     ACCENT_ENABLE_TRANSPARENTGRADIENT 把最外 1px 也一起透明化
-                // (2) DwmSetWindowAttribute(NCRENDERING_DISABLED) 彻底关掉 DWM 非客户区渲染
-                // 两者合体,窗口就完全等同于"自己就是形状",不会再有矩形载体边框喵
-                remove_dwm_frame(hwnd);
+/// 主窗口消息处理喵
+unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DefWindowProcW, PostQuitMessage, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_KEYDOWN,
+        WM_LBUTTONDOWN, WM_PAINT, WM_TIMER,
+    };
+    use windows_sys::Win32::Graphics::Gdi::ValidateRect;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_BACK;
 
-                // 置顶显示喵(是否激活由调用方决定: 搜索框要抢焦点,选择窗不能抢)喵
-                SetWindowPos(
-                    hwnd,
-                    HWND_TOPMOST,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
-                );
-                // activate=false 用 SW_SHOWNOACTIVATE,不抢搜索框的键盘焦点喵
-                ShowWindow(hwnd, if activate { SW_SHOW } else { SW_SHOWNOACTIVATE });
-            } else {
-                ShowWindow(hwnd, SW_HIDE);
+    match msg {
+        // 热键触发(热键线程 PostMessage 过来)喵
+        WM_MEOW_HOTKEY => {
+            with_handler(|h| h.on_event(WindowEvent::Hotkey));
+            0
+        }
+        // 导航键按下喵
+        WM_KEYDOWN => {
+            let vk = wparam as u16;
+            if let Some(key) = map_key(vk) {
+                with_handler(|h| h.on_event(WindowEvent::KeyDown(key)));
             }
+            // 特殊: 退格键不会产生 WM_CHAR,单独处理喵
+            if vk == VK_BACK {
+                with_handler(|h| h.on_event(WindowEvent::KeyDown(Key::Backspace)));
+            }
+            0
         }
-        log::debug!("窗口可见性: {visible} (激活: {activate}) 喵");
-        true
+        // 字符输入喵
+        WM_CHAR => {
+            let code = wparam as u32;
+            // 过滤控制字符,只保留可打印字符喵
+            if code >= 0x20 && code != 0x7f
+                && let Some(ch) = char::from_u32(code) {
+                    with_handler(|h| h.on_event(WindowEvent::Char(ch)));
+                }
+            0
+        }
+        // 鼠标左键按下喵
+        WM_LBUTTONDOWN => {
+            let (x, y) = unpack_lparam(lparam);
+            with_handler(|h| h.on_event(WindowEvent::MouseDown(x, y)));
+            0
+        }
+        // 失焦(前台切走)喵
+        WM_ACTIVATE => {
+            let active = (wparam as u32 & 0xFFFF) != 0; // WA_INACTIVE = 0 喵
+            if !active {
+                with_handler(|h| h.on_event(WindowEvent::LostFocus));
+            }
+            0
+        }
+        // 动画帧定时器喵
+        WM_TIMER => {
+            if wparam == TIMER_ID {
+                with_handler(|h| h.on_event(WindowEvent::Timer));
+            }
+            0
+        }
+        // 忽略系统重绘请求(我们主动渲染喵)
+        WM_PAINT => {
+            unsafe { ValidateRect(hwnd, null_mut()) };
+            0
+        }
+        // 请求关闭喵
+        WM_CLOSE => {
+            with_handler(|h| h.on_event(WindowEvent::Close));
+            0
+        }
+        WM_DESTROY => {
+            unsafe { PostQuitMessage(0) };
+            0
+        }
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
+}
 
-    fn move_window_hwnd(&self, hwnd: usize, x: f32, y: f32) -> bool {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{SWP_NOZORDER, SWP_NOSIZE, SetWindowPos};
-        unsafe {
-            SetWindowPos(
-                hwnd as HWND,
-                null_mut(),
-                x as i32,
-                y as i32,
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOZORDER,
-            );
-        }
-        log::debug!("窗口移动到 ({x}, {y}) 喵");
-        true
+/// 取当前 handler 并执行回调喵
+fn with_handler<R>(f: impl FnOnce(&mut dyn WindowHandler) -> R) -> Option<R> {
+    HANDLER.with(|slot| {
+        let ptr = *slot.borrow();
+        // 安全性: 消息循环单线程运行,handler 在循环存续期间有效喵
+        ptr.map(|p| f(unsafe { &mut *p }))
+    })
+}
+
+/// 虚拟键码 → 导航键喵
+fn map_key(vk: u16) -> Option<Key> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RETURN,
+        VK_RIGHT, VK_TAB, VK_UP,
+    };
+    match vk {
+        VK_UP => Some(Key::Up),
+        VK_DOWN => Some(Key::Down),
+        VK_LEFT => Some(Key::Left),
+        VK_RIGHT => Some(Key::Right),
+        VK_RETURN => Some(Key::Enter),
+        VK_ESCAPE => Some(Key::Escape),
+        VK_TAB => Some(Key::Tab),
+        VK_HOME => Some(Key::Home),
+        VK_END => Some(Key::End),
+        VK_PRIOR => Some(Key::PageUp),
+        VK_NEXT => Some(Key::PageDown),
+        VK_DELETE => Some(Key::Delete),
+        _ => None,
+    }
+}
+
+/// 从 lparam 提取客户区坐标(物理像素)喵
+///
+/// 低 16 位为 x,高 16 位为 y(有符号)喵。
+fn unpack_lparam(lparam: LPARAM) -> (f32, f32) {
+    let x = (lparam & 0xFFFF) as u16 as i16 as f32;
+    let y = ((lparam >> 16) & 0xFFFF) as u16 as i16 as f32;
+    (x, y)
+}
+
+/// 注册主窗口类喵
+fn register_class() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{RegisterClassW, WNDCLASSW};
+    let wc = WNDCLASSW {
+        lpfnWndProc: Some(wnd_proc),
+        lpszClassName: CLASS_NAME.as_ptr(),
+        hInstance: unsafe {
+            windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(null_mut())
+        },
+        // 背景刷为空,layered 窗口不依赖 WM_ERASEBKGND 喵
+        hbrBackground: null_mut(),
+        ..unsafe { zeroed() }
+    };
+    if unsafe { RegisterClassW(&wc) } == 0 {
+        log::error!("主窗口类注册失败喵");
+    } else {
+        log::debug!("主窗口类注册成功喵");
+    }
+}
+
+/// 声明进程 DPI 感知喵(窗口尺寸/坐标都按物理像素处理)喵
+fn enable_dpi_awareness() {
+    use windows_sys::Win32::UI::HiDpi::{
+        SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    };
+    unsafe {
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
 }
 
 // ---------------------------------------------------------------------------
-// DWM 异形窗口辅助: 关掉 DWM 给无边框窗口画的那一圈非客户区边框/阴影
+// 每像素透明呈现: UpdateLayeredWindow
 // ---------------------------------------------------------------------------
 
-/// 关掉 DWM 给无边框 PopUp 窗口画的非客户区边框 + 阴影,实现"窗口自己就是形状"喵
-///
-/// 背景: Windows 即便给了 `WS_POPUP`(dwstyle=0) + `WS_EX_NOREDIRECTIONBITMAP` + ACCENT 透明渐变,
-/// DWM 仍然会围绕这个矩形窗口画一圈非客户区边框/阴影(就是肉眼看到的"明显的边框")。
-/// 这里两步走把它彻底消掉:
-///   1. `DwmExtendFrameIntoClientArea(MARGINS{-1,-1,-1,-1})`: 把 DWM frame 扩到整个客户区,
-///      配合 ACCENT_ENABLE_TRANSPARENTGRADIENT,连最外 1px 都被透明化;
-///   2. `DwmSetWindowAttribute(DWMWA_NCRENDERING_POLICY, DWMNCRP_DISABLED)`: 彻底关掉 DWM 的
-///      非客户区渲染管线,不再有阴影/边框被画出来。
-fn remove_dwm_frame(hwnd: HWND) {
-    use windows_sys::Win32::Graphics::Dwm::{
-        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMNCRP_DISABLED,
-        DWMWA_NCRENDERING_POLICY,
+/// 把 BGRA 像素呈现到分层窗口喵(per-pixel alpha)喵
+fn present_impl(hwnd: HWND, width: i32, height: i32, bgra: &[u8]) {
+    use windows_sys::Win32::Graphics::Gdi::{
+        AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, DIB_RGB_COLORS, GetDC,
+        ReleaseDC, SelectObject,
     };
-    use windows_sys::Win32::UI::Controls::MARGINS;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{UpdateLayeredWindow, ULW_ALPHA};
+    use windows_sys::Win32::Foundation::{POINT, SIZE};
+
+    if width <= 0 || height <= 0 {
+        return;
+    }
 
     unsafe {
-        // 1) frame 扩到整个客户区(-1 = extend to entire client area)
-        let margins = MARGINS {
-            cxLeftWidth: -1,
-            cxRightWidth: -1,
-            cyTopHeight: -1,
-            cyBottomHeight: -1,
-        };
-        let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+        // 屏幕 DC + 兼容内存 DC 喵
+        let screen_dc = GetDC(null_mut());
+        let mem_dc = CreateCompatibleDC(screen_dc);
 
-        // 2) 关掉 DWM 非客户区渲染(同时去掉阴影 + 边框)
-        let policy: i32 = DWMNCRP_DISABLED;
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_NCRENDERING_POLICY as u32,
-            &policy as *const i32 as *const std::ffi::c_void,
-            std::mem::size_of::<i32>() as u32,
+        // 32bpp、负高度(自顶向下)位图信息喵
+        let mut bmi: BITMAPINFO = zeroed();
+        bmi.bmiHeader = BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB,
+            ..zeroed()
+        };
+
+        // 创建 DIB section,拿到可直接写入的像素指针喵
+        let mut bits: *mut std::ffi::c_void = null_mut();
+        let hbitmap = CreateDIBSection(
+            screen_dc,
+            &bmi,
+            DIB_RGB_COLORS,
+            &mut bits,
+            null_mut(),
+            0,
         );
+
+        if hbitmap.is_null() || bits.is_null() {
+            log::error!("CreateDIBSection 失败喵");
+            DeleteDC(mem_dc);
+            ReleaseDC(null_mut(), screen_dc);
+            return;
+        }
+
+        // 拷贝 BGRA 像素到 DIB 喵
+        let size = (width * height * 4) as usize;
+        let len = size.min(bgra.len());
+        std::ptr::copy_nonoverlapping(bgra.as_ptr(), bits as *mut u8, len);
+
+        // 选入内存 DC 后呈现喵
+        let old = SelectObject(mem_dc, hbitmap);
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        let src = POINT { x: 0, y: 0 };
+        let sz = SIZE {
+            cx: width,
+            cy: height,
+        };
+        UpdateLayeredWindow(
+            hwnd,
+            null_mut(),
+            null_mut(),
+            &sz,
+            mem_dc,
+            &src,
+            0,
+            &blend,
+            ULW_ALPHA,
+        );
+
+        // 清理喵
+        SelectObject(mem_dc, old);
+        DeleteObject(hbitmap);
+        DeleteDC(mem_dc);
+        ReleaseDC(null_mut(), screen_dc);
     }
 }
 
@@ -272,17 +551,18 @@ fn parse_hotkey(modifiers: &str, key: &str) -> Option<(u32, u32)> {
     Some((mods, vk))
 }
 
-/// 隐藏窗口消息循环: 注册热键、派发回调、响应注销喵
+/// 隐藏窗口消息循环: 注册热键、触发时激活目标窗口并派发事件喵
 fn hotkey_message_loop(
     mods: u32,
     vk: u32,
-    on_trigger: Box<dyn Fn() + Send + 'static>,
+    target_hwnd: usize,
     hwnd_holder: Arc<Mutex<Option<usize>>>,
 ) {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DestroyWindow, DispatchMessageW, GetMessageW, RegisterClassW,
-        TranslateMessage, MSG, WNDCLASSW, WM_HOTKEY, WS_OVERLAPPED,
+        CreateWindowExW, DestroyWindow, DispatchMessageW, GetMessageW, PostMessageW,
+        RegisterClassW, SetForegroundWindow, TranslateMessage, MSG, WNDCLASSW, WM_HOTKEY,
+        WS_OVERLAPPED,
     };
 
     // 注册隐藏窗口类喵
@@ -303,7 +583,7 @@ fn hotkey_message_loop(
             0,
             class_name.as_ptr(),
             class_name.as_ptr(),
-            WS_OVERLAPPED as u32,
+            WS_OVERLAPPED,
             0,
             0,
             0,
@@ -335,7 +615,9 @@ fn hotkey_message_loop(
     while unsafe { GetMessageW(&mut msg, null_mut(), 0, 0) } > 0 {
         if msg.message == WM_HOTKEY && msg.wParam as i32 == HOTKEY_ID {
             log::debug!("收到全局热键喵!");
-            on_trigger();
+            // 先激活主窗口(用户主动按热键,允许抢前台)再派发事件喵
+            unsafe { SetForegroundWindow(target_hwnd as HWND) };
+            unsafe { PostMessageW(target_hwnd as HWND, WM_MEOW_HOTKEY, 0, 0) };
         }
         unsafe {
             TranslateMessage(&msg);
@@ -354,9 +636,9 @@ fn hotkey_message_loop(
 unsafe extern "system" fn hotkey_wnd_proc(
     hwnd: HWND,
     msg: u32,
-    wparam: usize,
-    lparam: isize,
-) -> isize {
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         DefWindowProcW, DestroyWindow, PostQuitMessage, WM_CLOSE, WM_DESTROY,
     };
@@ -381,12 +663,10 @@ unsafe extern "system" fn hotkey_wnd_proc(
 /// 用 SHGetFileInfoW 提取文件图标为 BGRA 像素喵
 fn extract_icon_pixels_impl(path: &str) -> Option<IconPixels> {
     use windows_sys::Win32::Graphics::Gdi::{
-        DeleteObject, GetDIBits, GetDC, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO,
-        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+        BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC,
+        GetDIBits, GetObjectW, ReleaseDC,
     };
-    use windows_sys::Win32::UI::Shell::{
-        SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGetFileInfoW,
-    };
+    use windows_sys::Win32::UI::Shell::{SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGetFileInfoW};
     use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, ICONINFO};
 
     let path_wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
@@ -521,3 +801,8 @@ fn launch_impl(path: &str) -> bool {
         true
     }
 }
+
+// 引入必要的 Win32 常量喵
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+};

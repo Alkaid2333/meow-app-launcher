@@ -64,7 +64,7 @@ fn collect_links(dir: &Path, out: &mut Vec<AppInfo>) {
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_lowercase();
-            if lower.contains("uninstall") {
+            if lower.contains("uninstall") | lower.contains("卸载") {
                 continue;
             }
             collect_links(&path, out);
@@ -78,9 +78,7 @@ fn collect_links(dir: &Path, out: &mut Vec<AppInfo>) {
                 .unwrap_or("未命名应用")
                 .to_string();
             // 过滤明显没用的系统链接喵
-            if name.is_empty()
-                || name.eq_ignore_ascii_case("desktop.ini")
-                || name.starts_with(".")
+            if name.is_empty() || name.eq_ignore_ascii_case("desktop.ini") || name.starts_with(".")
             {
                 continue;
             }
