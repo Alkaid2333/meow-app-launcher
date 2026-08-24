@@ -2,10 +2,46 @@
 name = "meow-app-launcher"
 version = "0.1.0"
 edition = "2024"
+description = "喵喵应用启动器 - 类 macOS 聚焦搜索的跨平台高性能应用启动器喵"
+license = "MIT"
+
+[[bin]]
+name = "meowal"
+path = "src/main.rs"
 
 [dependencies]
 gpui = "0.2.2"
 gpui-component = "0.5.1"
 gpui-component-assets = "0.5.1"
-logforth = "0.30.1"
-tokio = "1.53.1"
+logforth = { version = "0.30.1", features = ["starter-log"] }
+colored = "3.1"
+jiff = "0.2"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time"] }
+log = "0.4.27"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+pinyin = "0.10"
+png = "0.17"
+dirs = "6.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_Storage_FileSystem",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_Controls",
+    "Win32_System_Threading",
+] }
+raw-window-handle = "0.6"
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = "thin"

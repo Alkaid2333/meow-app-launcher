@@ -1,0 +1,348 @@
+//! 搜索逻辑喵~
+//!
+//! 把模糊匹配、拼音索引、模式解析组合成完整搜索能力喵。
+//! 支持三种模式喵:
+//! * 名称模式(默认): 模糊匹配名称/拼音喵
+//! * Tag 模式: `t: xxx` 按标签搜索喵
+//! * 首字母模式: `i: a b c` 按首字母搜索喵
+
+pub mod fuzzy;
+
+use crate::apps::AppInfo;
+use pinyin::ToPinyin;
+use std::collections::HashMap;
+
+/// 搜索结果条数上限喵
+const MAX_RESULTS: usize = 30;
+
+/// 搜索模式喵
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchMode {
+    /// 按名称模糊搜索喵
+    Name,
+    /// 按 Tag 搜索喵
+    Tag,
+    /// 按首字母搜索喵
+    Initial,
+}
+
+/// 解析后的查询喵
+#[derive(Debug, Clone)]
+pub struct ParsedQuery {
+    pub mode: SearchMode,
+    /// 去掉前缀后的关键字喵
+    pub keywords: String,
+    /// 首字母模式的多个字母喵
+    pub initials: Vec<char>,
+}
+
+impl ParsedQuery {
+    /// 解析用户输入喵,支持 `t:` / `i:` 前缀喵
+    pub fn parse(input: &str) -> Self {
+        let trimmed = input.trim();
+        if let Some(tag) = trimmed.strip_prefix("t:").or_else(|| trimmed.strip_prefix("T:")) {
+            return Self {
+                mode: SearchMode::Tag,
+                keywords: tag.trim().to_string(),
+                initials: Vec::new(),
+            };
+        }
+        if let Some(init) = trimmed.strip_prefix("i:").or_else(|| trimmed.strip_prefix("I:")) {
+            let initials: Vec<char> = init
+                .split_whitespace()
+                .filter_map(|w| w.chars().next())
+                .collect();
+            return Self {
+                mode: SearchMode::Initial,
+                keywords: init.trim().to_string(),
+                initials,
+            };
+        }
+        Self {
+            mode: SearchMode::Name,
+            keywords: trimmed.to_string(),
+            initials: Vec::new(),
+        }
+    }
+
+    /// 查询是否为空喵
+    pub fn is_empty(&self) -> bool {
+        self.keywords.is_empty()
+    }
+}
+
+/// 拼音索引缓存喵(应用名 → 拼音数据)
+#[derive(Debug, Default)]
+pub struct PinyinIndex {
+    /// 全拼索引: 应用名 → 不带声调的全拼喵
+    full: HashMap<String, String>,
+    /// 首字母索引: 应用名 → 各字首字母喵
+    initials: HashMap<String, String>,
+}
+
+impl PinyinIndex {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 为注册表建立/更新拼音索引喵
+    pub fn rebuild(&mut self, apps: &[AppInfo]) {
+        self.full.clear();
+        self.initials.clear();
+        for app in apps {
+            self.full.insert(app.name.clone(), to_pinyin_full(&app.name));
+            self.initials.insert(app.name.clone(), to_pinyin_initials(&app.name));
+        }
+        log::debug!("拼音索引重建完成: {} 个应用喵", self.full.len());
+    }
+
+    fn get_full(&self, name: &str) -> &str {
+        self.full.get(name).map(|s| s.as_str()).unwrap_or("")
+    }
+
+    fn get_initials(&self, name: &str) -> &str {
+        self.initials.get(name).map(|s| s.as_str()).unwrap_or("")
+    }
+}
+
+/// 计算名称的全拼(不带声调)喵,非汉字原样保留喵
+pub fn to_pinyin_full(name: &str) -> String {
+    name.chars()
+        .map(|c| match c.to_pinyin() {
+            Some(p) => p.plain().to_string(),
+            None => c.to_string(),
+        })
+        .collect()
+}
+
+/// 计算名称的拼音首字母喵,非汉字取字符本身喵
+pub fn to_pinyin_initials(name: &str) -> String {
+    name.chars()
+        .map(|c| match c.to_pinyin() {
+            Some(p) => p.first_letter().to_string(),
+            None => c.to_ascii_lowercase().to_string(),
+        })
+        .collect()
+}
+
+/// 搜索引擎喵
+pub struct SearchEngine {
+    pinyin: PinyinIndex,
+}
+
+impl Default for SearchEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SearchEngine {
+    pub fn new() -> Self {
+        Self {
+            pinyin: PinyinIndex::new(),
+        }
+    }
+
+    /// 同步拼音索引喵(注册表变化后调用)喵
+    pub fn sync(&mut self, apps: &[AppInfo]) {
+        self.pinyin.rebuild(apps);
+    }
+
+    /// 执行搜索喵,返回按分数降序的应用引用喵
+    ///
+    /// * 空查询: 按配置返回推荐区(最近/收藏/最常用/全部)——由视图层决定,这里返回空喵
+    /// * 非空查询: 模糊匹配名称、全拼、首字母,取最高分喵
+    pub fn search<'a>(&self, registry: &'a crate::apps::AppRegistry, input: &str) -> Vec<&'a AppInfo> {
+        let parsed = ParsedQuery::parse(input);
+        if parsed.is_empty() {
+            return Vec::new();
+        }
+
+        let mut scored: Vec<(&AppInfo, f32)> = Vec::new();
+        for app in &registry.apps {
+            if let Some(score) = self.score_app(app, &parsed) {
+                scored.push((app, score));
+            }
+        }
+        // 按分数降序,分数相同按名称排序保证稳定喵
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.name.cmp(&b.0.name))
+        });
+        scored.truncate(MAX_RESULTS);
+        scored.into_iter().map(|(app, _)| app).collect()
+    }
+
+    /// 计算单个应用对查询的匹配分数喵
+    fn score_app(&self, app: &AppInfo, parsed: &ParsedQuery) -> Option<f32> {
+        match parsed.mode {
+            SearchMode::Name => {
+                let q = parsed.keywords.trim().to_lowercase();
+                if q.is_empty() {
+                    return None;
+                }
+                let mut best = 0.0_f32;
+
+                // 1. 名称直接匹配喵
+                if let Some(m) = fuzzy::fuzzy_match(&q, &app.name.to_lowercase()) {
+                    best = best.max(m.score);
+                }
+                // 2. 全拼匹配喵
+                let full = self.pinyin.get_full(&app.name).to_lowercase();
+                if !full.is_empty() {
+                    if let Some(m) = fuzzy::fuzzy_match(&q, &full) {
+                        best = best.max(m.score);
+                    }
+                }
+                // 3. 首字母匹配喵
+                let initials = self.pinyin.get_initials(&app.name).to_lowercase();
+                if !initials.is_empty() && !q.is_empty() {
+                    if let Some(m) = fuzzy::fuzzy_match(&q, &initials) {
+                        best = best.max(m.score);
+                    }
+                }
+
+                if best > 0.0 {
+                    Some(best)
+                } else {
+                    None
+                }
+            }
+            SearchMode::Tag => {
+                let q = parsed.keywords.trim().to_lowercase();
+                if q.is_empty() {
+                    return None;
+                }
+                // Tag 支持模糊匹配喵
+                let matched = app
+                    .tags
+                    .iter()
+                    .any(|tag| fuzzy::fuzzy_match(&q, &tag.to_lowercase()).is_some());
+                matched.then_some(60.0)
+            }
+            SearchMode::Initial => {
+                if parsed.initials.is_empty() {
+                    return None;
+                }
+                let initials = self.pinyin.get_initials(&app.name).to_lowercase();
+                // 每个首字母都要在索引里命中喵
+                let all = parsed
+                    .initials
+                    .iter()
+                    .all(|ch| initials.contains(ch.to_ascii_lowercase()));
+                all.then_some(70.0)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::apps::{AppInfo, AppRegistry, AppSource};
+
+    fn make_registry() -> AppRegistry {
+        let mut reg = AppRegistry::default();
+        reg.upsert(AppInfo {
+            name: "谷歌浏览器".into(),
+            path: "C:/chrome.exe".into(),
+            icon_path: None,
+            tags: vec!["浏览器".into(), "常用".into()],
+            favorite: true,
+            launch_count: 3,
+            last_used: 100,
+            source: AppSource::Manual,
+        });
+        reg.upsert(AppInfo {
+            name: "Firefox".into(),
+            path: "C:/firefox.exe".into(),
+            icon_path: None,
+            tags: vec!["浏览器".into()],
+            favorite: false,
+            launch_count: 1,
+            last_used: 50,
+            source: AppSource::Scanned,
+        });
+        reg.upsert(AppInfo {
+            name: "Google Chrome".into(),
+            path: "C:/chrome.exe".into(),
+            icon_path: None,
+            tags: vec!["浏览器".into()],
+            favorite: false,
+            launch_count: 2,
+            last_used: 80,
+            source: AppSource::Scanned,
+        });
+        reg.upsert(AppInfo {
+            name: "终端".into(),
+            path: "C:/terminal.exe".into(),
+            icon_path: None,
+            tags: vec!["开发".into()],
+            favorite: false,
+            launch_count: 0,
+            last_used: 0,
+            source: AppSource::Scanned,
+        });
+        reg
+    }
+
+    #[test]
+    fn search_by_english_name() {
+        let reg = make_registry();
+        let mut engine = SearchEngine::new();
+        let results = engine.search(&reg, "fire");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "Firefox");
+    }
+
+    #[test]
+    fn search_by_chinese_pinyin() {
+        let reg = make_registry();
+        let mut engine = SearchEngine::new();
+        // 同步拼音索引(实际运行时 AppState 会做,测试里手动做喵)
+        engine.sync(&reg.apps);
+        // "guge" 应命中「谷歌浏览器」喵
+        let results = engine.search(&reg, "guge");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "谷歌浏览器");
+    }
+
+    #[test]
+    fn search_by_initial_letters() {
+        let reg = make_registry();
+        let mut engine = SearchEngine::new();
+        engine.sync(&reg.apps);
+        // "gg" 首字母 → 谷歌浏览器(ggllq)喵
+        let results = engine.search(&reg, "gg");
+        assert!(results.iter().any(|a| a.name == "谷歌浏览器"));
+    }
+
+    #[test]
+    fn search_by_tag() {
+        let reg = make_registry();
+        let mut engine = SearchEngine::new();
+        engine.sync(&reg.apps);
+        let results = engine.search(&reg, "t: 浏览器");
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn search_by_initial_mode() {
+        let reg = make_registry();
+        let mut engine = SearchEngine::new();
+        engine.sync(&reg.apps);
+        let results = engine.search(&reg, "i: z");
+        assert!(results.iter().any(|a| a.name == "终端"));
+    }
+
+    #[test]
+    fn fuzzy_fallback_for_mixed() {
+        // 中英混合应用名也要能搜喵
+        let reg = make_registry();
+        let mut engine = SearchEngine::new();
+        engine.sync(&reg.apps);
+        let results = engine.search(&reg, "google");
+        assert!(results.iter().any(|a| a.name == "Google Chrome"));
+    }
+}
