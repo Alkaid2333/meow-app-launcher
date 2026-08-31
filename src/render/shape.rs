@@ -76,6 +76,7 @@ pub fn rounded_rect_path(rect: Rect, radius: f32) -> Path {
 }
 
 /// 胶囊路径喵: 圆角 = 高度一半,即两端半圆喵
+#[cfg(test)]
 pub fn capsule_path(rect: Rect) -> Path {
     rounded_rect_path(rect, rect.height() / 2.0)
 }

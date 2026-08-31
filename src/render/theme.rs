@@ -4,7 +4,7 @@
 //! 遵循 window-design skill 的铁律: 页面里禁止写死色值,一律走主题 token 喵。
 //! 后续可扩展为从 theme 配置文件加载自定义主题喵。
 
-use crate::app::config::ThemeMode;
+use crate::app::config::{Backdrop, ThemeMode};
 use skia_safe::Color;
 
 /// 启动器主题色板喵
@@ -26,15 +26,28 @@ pub struct Theme {
     pub accent_text: Color,
     /// 面板阴影喵
     pub shadow: Color,
+    /// 背景材质喵
+    pub backdrop: Backdrop,
+    /// 材质填充(含透明度)喵
+    pub fill: Color,
+    /// 顶沿高光喵
+    pub highlight: Color,
 }
 
 impl Theme {
     /// 按配置模式取主题喵
-    pub fn for_mode(mode: ThemeMode) -> Self {
-        match mode {
+    pub fn for_mode(mode: ThemeMode, backdrop: Backdrop) -> Self {
+        let mut theme = match mode {
             ThemeMode::Light => Self::light(),
             ThemeMode::Dark => Self::dark(),
-        }
+        };
+        theme.backdrop = backdrop;
+        theme.fill = match backdrop {
+            Backdrop::Opaque => theme.background,
+            Backdrop::Mica => with_alpha(theme.background, if mode == ThemeMode::Light { 0xD8 } else { 0xC0 }),
+            Backdrop::Acrylic => with_alpha(theme.background, if mode == ThemeMode::Light { 0xB8 } else { 0xA0 }),
+        };
+        theme
     }
 
     /// 浅色主题喵~ 清爽透亮喵!
@@ -48,6 +61,9 @@ impl Theme {
             accent: Color::from_rgb(0x6C, 0x5C, 0xE7),
             accent_text: Color::from_rgb(0xFF, 0xFF, 0xFF),
             shadow: Color::from_argb(0x28, 0x00, 0x00, 0x00),
+            backdrop: Backdrop::Opaque,
+            fill: Color::from_argb(0xFF, 0xF5, 0xF7, 0xFA),
+            highlight: Color::from_argb(0x40, 0xFF, 0xFF, 0xFF),
         }
     }
 
@@ -62,8 +78,15 @@ impl Theme {
             accent: Color::from_rgb(0x8B, 0x7C, 0xF6),
             accent_text: Color::from_rgb(0x14, 0x16, 0x1B),
             shadow: Color::from_argb(0x50, 0x00, 0x00, 0x00),
+            backdrop: Backdrop::Opaque,
+            fill: Color::from_argb(0xFF, 0x14, 0x16, 0x1B),
+            highlight: Color::from_argb(0x28, 0xFF, 0xFF, 0xFF),
         }
     }
+}
+
+fn with_alpha(color: Color, alpha: u8) -> Color {
+    Color::from_argb(alpha, color.r(), color.g(), color.b())
 }
 
 /// 配置 GUI 主题色板喵(语义 token,浅色/深色两套)喵

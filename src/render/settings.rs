@@ -66,6 +66,17 @@ pub enum SettingsRow {
     Label { label: String, value: String },
     /// 动作按钮喵
     Button { label: String },
+    /// 可点选的应用行喵
+    AppPick {
+        name: String,
+        favorite: bool,
+        tags: String,
+        selected: bool,
+    },
+    /// 标签芯片喵
+    Chip { label: String },
+    /// 单行输入(显示当前草稿)喵
+    Input { label: String, value: String },
 }
 
 /// 行命中类型喵(供交互层使用)喵
@@ -83,6 +94,14 @@ pub enum RowHit {
     StepperInc(usize),
     /// 按钮行(索引)喵
     Button(usize),
+    /// 点选应用(索引)喵
+    AppPick(usize),
+    /// 收藏星标(索引)喵
+    FavStar(usize),
+    /// 标签芯片(索引)喵
+    Chip(usize),
+    /// 输入行(索引)喵
+    Input(usize),
 }
 
 /// 布局结果喵(绘制时产出,供命中测试)喵
@@ -335,7 +354,6 @@ fn paint_row(
             crate::render::text::draw_clipped(canvas, value, value_rect, &value_font, &vp);
         }
         SettingsRow::Button { label } => {
-            // 整行按钮喵
             let mut btn_rect = rect;
             btn_rect.inset((0.0, 8.0));
             let path = shape::rounded_rect_path(btn_rect, 8.0);
@@ -349,6 +367,89 @@ fn paint_row(
             p.set_anti_alias(true);
             crate::render::text::draw_centered(canvas, label, btn_rect, &font, &p);
             hits.push((rect, RowHit::Button(index)));
+        }
+        SettingsRow::AppPick {
+            name,
+            favorite,
+            tags,
+            selected,
+        } => {
+            if *selected {
+                let path = shape::rounded_rect_path(rect, 8.0);
+                let mut bg = Paint::default();
+                bg.set_color(theme.accent);
+                bg.set_anti_alias(true);
+                canvas.draw_path(&path, &bg);
+                let mut overlay = Paint::default();
+                overlay.set_color(theme.group_bg);
+                overlay.set_anti_alias(true);
+                overlay.set_alpha_f(0.82);
+                canvas.draw_path(&path, &overlay);
+            }
+            let star = if *favorite { "★" } else { "☆" };
+            let star_rect = Rect::from_xywh(rect.left, rect.top, 28.0, rect.height());
+            let font = fonts.font(16.0);
+            let mut sp = Paint::default();
+            sp.set_color(if *favorite { theme.accent } else { theme.text_dim });
+            sp.set_anti_alias(true);
+            crate::render::text::draw_centered(canvas, star, star_rect, &font, &sp);
+            hits.push((star_rect, RowHit::FavStar(index)));
+
+            let mut np = Paint::default();
+            np.set_color(theme.text);
+            np.set_anti_alias(true);
+            crate::render::text::draw_clipped(
+                canvas,
+                name,
+                Rect::from_xywh(rect.left + 32.0, rect.top, rect.width() - 40.0, rect.height() * 0.55),
+                &fonts.font(13.0),
+                &np,
+            );
+            let mut tp = Paint::default();
+            tp.set_color(theme.text_dim);
+            tp.set_anti_alias(true);
+            crate::render::text::draw_clipped(
+                canvas,
+                tags,
+                Rect::from_xywh(rect.left + 32.0, rect.top + rect.height() * 0.5, rect.width() - 40.0, rect.height() * 0.45),
+                &fonts.font(11.0),
+                &tp,
+            );
+            hits.push((rect, RowHit::AppPick(index)));
+        }
+        SettingsRow::Chip { label } => {
+            let chip = Rect::from_xywh(rect.left, rect.center_y() - 12.0, 120.0f32.min(rect.width()), 24.0);
+            let path = shape::rounded_rect_path(chip, 12.0);
+            let mut bg = Paint::default();
+            bg.set_color(theme.control_bg);
+            bg.set_anti_alias(true);
+            canvas.draw_path(&path, &bg);
+            let mut p = Paint::default();
+            p.set_color(theme.text);
+            p.set_anti_alias(true);
+            crate::render::text::draw_centered(canvas, &format!("{label} ×"), chip, &fonts.font(12.0), &p);
+            hits.push((chip, RowHit::Chip(index)));
+        }
+        SettingsRow::Input { label, value } => {
+            draw_row_label(canvas, theme, fonts, label, rect);
+            let box_rect = Rect::from_xywh(rect.right - 220.0, rect.center_y() - 14.0, 220.0, 28.0);
+            let path = shape::rounded_rect_path(box_rect, 7.0);
+            let mut bg = Paint::default();
+            bg.set_color(theme.control_bg);
+            bg.set_anti_alias(true);
+            canvas.draw_path(&path, &bg);
+            let shown = if value.is_empty() { "输入后回车喵" } else { value };
+            let mut p = Paint::default();
+            p.set_color(if value.is_empty() { theme.text_dim } else { theme.text });
+            p.set_anti_alias(true);
+            crate::render::text::draw_clipped(
+                canvas,
+                shown,
+                Rect::from_xywh(box_rect.left + 8.0, box_rect.top, box_rect.width() - 12.0, box_rect.height()),
+                &fonts.font(12.0),
+                &p,
+            );
+            hits.push((box_rect, RowHit::Input(index)));
         }
     }
 }

@@ -5,7 +5,7 @@
 //!
 //! 状态机: 常驻(隐藏) → 收到 `settings_visible` 标志 → 显示并渲染 → 红点关闭喵。
 
-use crate::app::config::{AppConfig, ThemeMode};
+use crate::app::config::{AppConfig, SearchMode, ThemeMode};
 use crate::app::{Command, SharedState};
 use crate::platform::{Platform, PlatformWindow, WindowEvent, WindowHandler};
 use crate::render::font::FontCache;
@@ -50,6 +50,12 @@ pub struct SettingsWindow {
     scale: f32,
     /// BGRA 像素缓冲喵
     pixels: Vec<u8>,
+    /// 当前选中的应用名喵
+    selected_app: Option<String>,
+    /// 标签输入草稿喵
+    tag_draft: String,
+    /// 是否正在编辑标签喵
+    tag_focus: bool,
 }
 
 impl SettingsWindow {
@@ -98,10 +104,13 @@ impl SettingsWindow {
             layout: None,
             scale,
             pixels: Vec::new(),
+            selected_app: None,
+            tag_draft: String::new(),
+            tag_focus: false,
         };
 
         platform.set_window_handler(&window, Box::new(settings));
-        // 启动心跳,检查显示请求喵
+        platform.enable_file_drop(&window);
         platform.set_timer(&window, HEARTBEAT_MS);
 
         window
@@ -137,7 +146,12 @@ impl SettingsWindow {
         // 从当前配置重建页面喵
         let pages = {
             let state = self.state.borrow();
-            build_pages(&state.config, state.registry.apps.len())
+            build_pages(
+                &state.config,
+                &state.registry.apps,
+                self.selected_app.as_deref(),
+                &self.tag_draft,
+            )
         };
         let theme = {
             let state = self.state.borrow();
@@ -199,6 +213,10 @@ impl SettingsWindow {
             RowHit::StepperDec(i) => self.adjust_stepper(i, -1),
             RowHit::StepperInc(i) => self.adjust_stepper(i, 1),
             RowHit::Button(i) => self.press_button(i),
+            RowHit::AppPick(i) => self.pick_app(i),
+            RowHit::FavStar(i) => self.toggle_fav(i),
+            RowHit::Chip(i) => self.remove_chip(i),
+            RowHit::Input(_) => self.tag_focus = true,
         }
         self.render();
     }
@@ -215,9 +233,8 @@ impl SettingsWindow {
                     ThemeMode::Dark
                 };
             }
-            (0, 4) => state.config.window.always_on_top = !state.config.window.always_on_top,
-            (0, 5) => state.config.hotkey.enabled = !state.config.hotkey.enabled,
-            // 搜索页喵
+            (0, 5) => state.config.window.always_on_top = !state.config.window.always_on_top,
+            (0, 6) => state.config.hotkey.enabled = !state.config.hotkey.enabled,
             (1, 0) => state.config.window.show_recent = !state.config.window.show_recent,
             (1, 1) => state.config.window.show_favorites = !state.config.window.show_favorites,
             (1, 2) => state.config.window.show_frequent = !state.config.window.show_frequent,
@@ -233,9 +250,9 @@ impl SettingsWindow {
         let (min, max) = self.stepper_range(index);
         let mut state = self.state.borrow_mut();
         let changed = match (self.current_page, index) {
-            (0, 1) => step_value(&mut state.config.window.width, delta, min, max),
-            (0, 2) => step_value(&mut state.config.window.height, delta, min, max),
-            (0, 3) => step_value(&mut state.config.window.icon_size, delta, min, max),
+            (0, 2) => step_value(&mut state.config.window.width, delta, min, max),
+            (0, 3) => step_value(&mut state.config.window.height, delta, min, max),
+            (0, 4) => step_value(&mut state.config.window.icon_size, delta, min, max),
             _ => false,
         };
         if changed {
@@ -263,11 +280,143 @@ impl SettingsWindow {
 
     /// 按钮动作喵
     fn press_button(&mut self, index: usize) {
-        // 应用页的「重新扫描」喵
-        if (self.current_page, index) == (2, 0) {
-            self.commands.borrow_mut().push_back(Command::Rescan);
-            log::info!("已请求重新扫描应用喵~");
+        match (self.current_page, index) {
+            (0, 1) => {
+                let mut state = self.state.borrow_mut();
+                state.config.theme.backdrop = state.config.theme.backdrop.cycle();
+                state.persist();
+                log::info!("浮窗材质 → {} 喵", state.config.theme.backdrop.label());
+            }
+            (1, 4) => {
+                let mut state = self.state.borrow_mut();
+                state.config.search.default_mode = match state.config.search.default_mode {
+                    SearchMode::Name => SearchMode::Tag,
+                    SearchMode::Tag => SearchMode::Initial,
+                    SearchMode::Initial => SearchMode::Name,
+                };
+                state.persist();
+            }
+            (2, 0) => {
+                self.commands.borrow_mut().push_back(Command::Rescan);
+                log::info!("已请求重新扫描应用喵~");
+            }
+            (2, 1) => {
+                if let Some(name) = self.selected_app.clone() {
+                    self.state.borrow_mut().remove_app(&name);
+                    self.selected_app = None;
+                    log::info!("已移除应用 {name} 喵");
+                }
+            }
+            _ => {}
         }
+    }
+
+    fn pick_app(&mut self, index: usize) {
+        self.selected_app = self.app_name_at(index);
+        self.tag_draft.clear();
+        self.tag_focus = false;
+    }
+
+    fn toggle_fav(&mut self, index: usize) {
+        if let Some(name) = self.app_name_at(index) {
+            self.state.borrow_mut().toggle_favorite(&name);
+        }
+    }
+
+    fn remove_chip(&mut self, index: usize) {
+        let Some(app_name) = self.selected_app.clone() else {
+            return;
+        };
+        let tag = self.chip_label_at(index);
+        if let Some(tag) = tag {
+            self.state.borrow_mut().remove_tag(&app_name, &tag);
+        }
+    }
+
+    fn app_name_at(&self, index: usize) -> Option<String> {
+        let page = self.pages.get(self.current_page)?;
+        let mut idx = 0;
+        for group in &page.groups {
+            for row in &group.rows {
+                if idx == index
+                    && let SettingsRow::AppPick { name, .. } = row
+                {
+                    return Some(name.clone());
+                }
+                idx += 1;
+            }
+        }
+        None
+    }
+
+    fn chip_label_at(&self, index: usize) -> Option<String> {
+        let page = self.pages.get(self.current_page)?;
+        let mut idx = 0;
+        for group in &page.groups {
+            for row in &group.rows {
+                if idx == index
+                    && let SettingsRow::Chip { label } = row
+                {
+                    return Some(label.clone());
+                }
+                idx += 1;
+            }
+        }
+        None
+    }
+
+    fn on_char(&mut self, ch: char) {
+        if !self.tag_focus || ch.is_control() {
+            return;
+        }
+        self.tag_draft.push(ch);
+        self.render();
+    }
+
+    fn on_key(&mut self, key: crate::platform::Key) {
+        if !self.tag_focus {
+            return;
+        }
+        match key {
+            crate::platform::Key::Backspace => {
+                self.tag_draft.pop();
+                self.render();
+            }
+            crate::platform::Key::Enter => {
+                if let Some(name) = self.selected_app.clone() {
+                    self.state.borrow_mut().add_tag(&name, &self.tag_draft);
+                    self.tag_draft.clear();
+                    self.render();
+                }
+            }
+            crate::platform::Key::Escape => {
+                self.tag_focus = false;
+                self.render();
+            }
+            _ => {}
+        }
+    }
+
+    fn drop_files(&mut self, paths: Vec<String>) {
+        for path in paths {
+            let p = std::path::Path::new(&path);
+            let ext = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if !matches!(ext.as_str(), "lnk" | "exe" | "bat" | "cmd" | "url") {
+                log::warn!("不支持的拖入类型: {path}");
+                continue;
+            }
+            let name = p
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .unwrap_or("未命名应用")
+                .to_string();
+            self.state.borrow_mut().register_app(&name, &path, None);
+        }
+        self.render();
     }
 
     /// 心跳喵: 检查显示请求并渲染喵
@@ -286,6 +435,10 @@ impl WindowHandler for SettingsWindow {
     fn on_event(&mut self, event: WindowEvent) {
         match event {
             WindowEvent::MouseDown(x, y) => self.handle_click(x, y),
+            WindowEvent::Char(ch) => self.on_char(ch),
+            WindowEvent::KeyDown(key) => self.on_key(key),
+            WindowEvent::ImePreedit(_) => {}
+            WindowEvent::FilesDropped(paths) => self.drop_files(paths),
             WindowEvent::MouseWheel(delta) => {
                 if self.visible {
                     // 滚轮滚动内容区,钳制到有效范围喵(每格滚动一行)喵
@@ -303,7 +456,7 @@ impl WindowHandler for SettingsWindow {
             }
             WindowEvent::Timer => self.tick(),
             WindowEvent::Close => self.hide(),
-            _ => {}
+            WindowEvent::Hotkey => {}
         }
     }
 }
@@ -319,17 +472,64 @@ fn step_value(value: &mut f32, delta: i32, min: f32, max: f32) -> bool {
 }
 
 /// 从配置构建页面模型喵
-fn build_pages(config: &AppConfig, app_count: usize) -> Vec<SettingsPage> {
+fn build_pages(
+    config: &AppConfig,
+    apps: &[crate::apps::AppInfo],
+    selected: Option<&str>,
+    tag_draft: &str,
+) -> Vec<SettingsPage> {
+    let mut app_rows: Vec<SettingsRow> = vec![
+        SettingsRow::Button {
+            label: "重新扫描应用".into(),
+        },
+        SettingsRow::Button {
+            label: "删除选中应用".into(),
+        },
+        SettingsRow::Label {
+            label: "已注册".into(),
+            value: format!("{} 个 · 拖入 .lnk/.exe 即可注册喵", apps.len()),
+        },
+    ];
+    for app in apps.iter().take(40) {
+        app_rows.push(SettingsRow::AppPick {
+            name: app.name.clone(),
+            favorite: app.favorite,
+            tags: if app.tags.is_empty() {
+                app.path.clone()
+            } else {
+                app.tags.join(" / ")
+            },
+            selected: selected == Some(app.name.as_str()),
+        });
+    }
+
+    let mut tag_rows = vec![SettingsRow::Input {
+        label: "给选中应用加 Tag".into(),
+        value: tag_draft.into(),
+    }];
+    if let Some(name) = selected
+        && let Some(app) = apps.iter().find(|a| a.name == name)
+    {
+        for tag in &app.tags {
+            tag_rows.push(SettingsRow::Chip { label: tag.clone() });
+        }
+    }
+
     vec![
         SettingsPage {
             title: "一般".into(),
             groups: vec![
                 SettingsGroup {
                     title: "外观".into(),
-                    rows: vec![SettingsRow::Switch {
-                        label: "深色模式".into(),
-                        value: config.theme.mode == ThemeMode::Dark,
-                    }],
+                    rows: vec![
+                        SettingsRow::Switch {
+                            label: "深色模式".into(),
+                            value: config.theme.mode == ThemeMode::Dark,
+                        },
+                        SettingsRow::Button {
+                            label: format!("浮窗材质: {}", config.theme.backdrop.label()),
+                        },
+                    ],
                 },
                 SettingsGroup {
                     title: "窗口".into(),
@@ -394,23 +594,31 @@ fn build_pages(config: &AppConfig, app_count: usize) -> Vec<SettingsPage> {
                         label: "始终显示全部".into(),
                         value: config.window.show_all,
                     },
+                    SettingsRow::Button {
+                        label: format!(
+                            "默认模式: {}",
+                            match config.search.default_mode {
+                                SearchMode::Name => "名称",
+                                SearchMode::Tag => "标签 t:",
+                                SearchMode::Initial => "首字母 i:",
+                            }
+                        ),
+                    },
                 ],
             }],
         },
         SettingsPage {
             title: "应用".into(),
-            groups: vec![SettingsGroup {
-                title: "注册".into(),
-                rows: vec![
-                    SettingsRow::Button {
-                        label: "重新扫描应用".into(),
-                    },
-                    SettingsRow::Label {
-                        label: "已注册应用".into(),
-                        value: format!("{app_count} 个"),
-                    },
-                ],
-            }],
+            groups: vec![
+                SettingsGroup {
+                    title: "注册".into(),
+                    rows: app_rows,
+                },
+                SettingsGroup {
+                    title: "标签".into(),
+                    rows: tag_rows,
+                },
+            ],
         },
         SettingsPage {
             title: "关于".into(),

@@ -7,17 +7,19 @@ use crate::app::config::AppConfig;
 use skia_safe::Rect;
 
 /// 搜索框宽度(逻辑 px)喵
-pub const BAR_WIDTH: f32 = 420.0;
+pub const BAR_WIDTH: f32 = 440.0;
 /// 搜索框高度(逻辑 px)喵
-pub const BAR_HEIGHT: f32 = 44.0;
-/// 搜索框与面板的垂直间距(逻辑 px)喵
-pub const GAP: f32 = 10.0;
+pub const BAR_HEIGHT: f32 = 52.0;
+/// 搜索框与面板的垂直间距(逻辑 px,一体岛为 0)喵
+pub const GAP: f32 = 0.0;
 /// 面板内边距(逻辑 px)喵
 pub const PANEL_PADDING: f32 = 8.0;
 /// 每条目高度(逻辑 px)喵
 pub const ITEM_HEIGHT: f32 = 44.0;
 /// 阴影安全边距(逻辑 px,为阴影预留空间)喵
 pub const SHADOW_MARGIN: f32 = 16.0;
+/// 一体岛圆角(逻辑 px,略小于半高,更像灵动岛)喵
+pub const ISLAND_RADIUS: f32 = 22.0;
 
 /// 一次布局的完整结果喵(全部为物理像素)喵
 #[derive(Debug, Clone)]
@@ -72,7 +74,7 @@ impl Layout {
         // 搜索框矩形(物理)喵
         let search_rect = Rect::from_xywh(m, m, BAR_WIDTH * s, BAR_HEIGHT * s);
 
-        // 面板矩形(物理)喵
+        // 面板矩形贴在搜索框下面,合成一块岛喵
         let panel_top = m + BAR_HEIGHT * s + GAP * s;
         let panel_rect = Rect::from_xywh(m, panel_top, BAR_WIDTH * s, panel_h * s);
 
@@ -112,7 +114,7 @@ mod tests {
         let cfg = AppConfig::default();
         let l = Layout::compute(&cfg, 1.0, 0, 1.0, 0.0);
         assert_eq!(l.panel_height, 0.0);
-        assert!(l.window_height <= SHADOW_MARGIN * 2.0 + BAR_HEIGHT + GAP);
+        assert!(l.window_height <= SHADOW_MARGIN * 2.0 + BAR_HEIGHT + GAP + 1.0);
     }
 
     /// 有结果且进度为 1 时面板满展开喵

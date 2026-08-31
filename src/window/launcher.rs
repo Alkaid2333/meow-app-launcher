@@ -12,7 +12,7 @@
 //! * 展开: 有结果时面板弹簧展开,无结果时折叠喵
 
 use crate::animation::{LauncherSprings, params};
-use crate::app::{Command, SharedState};
+use crate::app::{Command, ListItem, SharedState};
 use crate::apps::AppInfo;
 use crate::apps::icon::IconExtractor;
 use crate::platform::{Key, Platform, PlatformWindow, WindowEvent, WindowHandler};
@@ -29,6 +29,8 @@ use std::time::{Duration, Instant};
 const ANIM_INTERVAL_MS: u32 = 16;
 /// 光标闪烁间隔(ms)喵
 const CARET_INTERVAL_MS: u32 = 500;
+/// 隐藏时心跳(ms): 必须常驻,否则托盘命令永远排不空喵
+const HEARTBEAT_MS: u32 = 100;
 /// 光标闪烁半周期喵
 const CARET_HALF_PERIOD: Duration = Duration::from_millis(500);
 /// 呼出时的屏幕垂直位置比例(距顶部)喵
@@ -82,6 +84,8 @@ pub struct Launcher {
     pending_icons: HashSet<String>,
     /// 应用命令队列喵(托盘/配置窗口投递)喵
     commands: Rc<RefCell<VecDeque<Command>>>,
+    /// IME 预编辑串喵
+    ime_preedit: String,
 }
 
 impl Launcher {
@@ -148,6 +152,7 @@ impl Launcher {
             icon_extractor,
             pending_icons: HashSet::new(),
             commands,
+            ime_preedit: String::new(),
         };
 
         // 首次启动后台异步扫描系统应用喵(不阻塞窗口创建)喵
@@ -158,6 +163,8 @@ impl Launcher {
 
         // 绑定事件处理器喵
         platform.set_window_handler(&window, Box::new(launcher));
+        // 常驻心跳: 隐藏时也要排空托盘命令喵
+        platform.set_timer(&window, HEARTBEAT_MS);
 
         window
     }
@@ -178,7 +185,9 @@ impl Launcher {
             state.reset_search();
             state.launcher_visible = true;
         }
+        self.ime_preedit.clear();
         self.platform.show_window(&self.window, true);
+        self.platform.focus_window(&self.window);
         self.start_animation();
         self.request_render();
     }
@@ -187,6 +196,7 @@ impl Launcher {
     fn hide(&mut self) {
         log::info!("隐藏搜索框喵~");
         self.visible = false;
+        self.ime_preedit.clear();
         {
             let mut state = self.state.borrow_mut();
             state.reset_search();
@@ -194,7 +204,7 @@ impl Launcher {
         }
         self.springs.snap(false, false);
         self.platform.show_window(&self.window, false);
-        self.stop_animation();
+        self.platform.set_timer(&self.window, HEARTBEAT_MS);
     }
 
     /// 切换呼出/隐藏喵
@@ -213,6 +223,7 @@ impl Launcher {
     /// 字符输入喵
     fn on_char(&mut self, ch: char) {
         if !ch.is_control() {
+            self.ime_preedit.clear();
             self.state.borrow_mut().query.push(ch);
             self.refresh_results();
         }
@@ -227,10 +238,16 @@ impl Launcher {
                 self.state.borrow_mut().query.pop();
                 self.refresh_results();
             }
-            Key::Up => self.move_selection(-1),
-            Key::Down => self.move_selection(1),
+            Key::Up => self.nudge_selection(-1),
+            Key::Down => self.nudge_selection(1),
             _ => {}
         }
+    }
+
+    /// IME 预览串喵
+    fn on_ime_preedit(&mut self, text: String) {
+        self.ime_preedit = text;
+        self.request_render();
     }
 
     /// 鼠标按下(点击条目启动)喵
@@ -248,6 +265,9 @@ impl Launcher {
         };
         for (i, rect) in layout.item_rects.iter().enumerate() {
             if rect.left <= x && x <= rect.right && rect.top <= y && y <= rect.bottom {
+                if matches!(self.state.borrow().results.get(i), Some(ListItem::Section(_))) {
+                    return;
+                }
                 self.state.borrow_mut().selected = i;
                 self.launch_selected();
                 return;
@@ -267,16 +287,12 @@ impl Launcher {
         self.request_render();
     }
 
-    /// 移动选中(环绕)喵
-    fn move_selection(&mut self, delta: isize) {
-        let len = self.state.borrow().results.len();
-        if len == 0 {
+    /// 移动选中(环绕,跳过分组头)喵
+    fn nudge_selection(&mut self, delta: isize) {
+        if self.state.borrow().results.is_empty() {
             return;
         }
-        {
-            let mut state = self.state.borrow_mut();
-            state.selected = (state.selected as isize + delta).rem_euclid(len as isize) as usize;
-        }
+        self.state.borrow_mut().move_selection(delta);
         self.ensure_selected_visible();
         log::debug!("选中: {} 喵", self.state.borrow().selected);
         self.request_render();
@@ -334,6 +350,7 @@ impl Launcher {
         log::info!("打开配置窗口喵~");
         self.state.borrow_mut().settings_visible = true;
         self.platform.show_window(&self.settings_window, true);
+        self.platform.focus_window(&self.settings_window);
     }
 
     /// 重启应用喵
@@ -382,9 +399,17 @@ impl Launcher {
     fn request_missing_icons(&mut self) {
         let extractor = self.icon_extractor.clone();
         // 克隆结果列表,避免迭代期间借用 self.state 喵
-        let results = self.state.borrow().results.clone();
-        for app in results {
-            // 已提交提取或已有缓存则跳过喵
+        let apps: Vec<AppInfo> = self
+            .state
+            .borrow()
+            .results
+            .iter()
+            .filter_map(|i| match i {
+                ListItem::App(app) => Some(app.clone()),
+                ListItem::Section(_) => None,
+            })
+            .collect();
+        for app in apps {
             if self.pending_icons.contains(&app.name) {
                 continue;
             }
@@ -426,16 +451,20 @@ impl Launcher {
         self.platform.set_timer(&self.window, ANIM_INTERVAL_MS);
     }
 
-    /// 停止定时器(零功耗)喵
-    fn stop_animation(&mut self) {
-        self.platform.kill_timer(&self.window);
-    }
-
     /// 动画帧推进喵
     fn tick(&mut self) {
         let now = Instant::now();
         let elapsed = self.last_tick.map(|t| now - t).unwrap_or(Duration::ZERO);
         self.last_tick = Some(now);
+
+        // 处理后台任务结果与应用命令(隐藏时也要跑,否则托盘点了没反应)喵
+        self.drain_bg_events();
+        self.drain_commands();
+
+        if !self.visible {
+            self.platform.set_timer(&self.window, HEARTBEAT_MS);
+            return;
+        }
 
         // 光标闪烁(半周期)喵
         self.caret_acc += elapsed;
@@ -451,19 +480,10 @@ impl Launcher {
             self.state.borrow().results_visible,
         );
 
-        // 处理后台任务结果与应用命令喵
-        self.drain_bg_events();
-        self.drain_commands();
-
         self.request_render();
 
-        // 定时器策略: 动画中 16ms;静止但可见时 500ms(光标闪烁);隐藏则停喵
-        if self.visible {
-            let interval = if animating { ANIM_INTERVAL_MS } else { CARET_INTERVAL_MS };
-            self.platform.set_timer(&self.window, interval);
-        } else {
-            self.stop_animation();
-        }
+        let interval = if animating { ANIM_INTERVAL_MS } else { CARET_INTERVAL_MS };
+        self.platform.set_timer(&self.window, interval);
     }
 
     /// 渲染一帧并呈现喵
@@ -493,14 +513,23 @@ impl Launcher {
         // 绘制场景喵
         let theme = {
             let state = self.state.borrow();
-            Theme::for_mode(state.config.theme.mode)
+            Theme::for_mode(state.config.theme.mode, state.config.theme.backdrop)
         };
         let alpha = self.springs.alpha.value;
-        let caret_on = self.caret_on && self.visible && !self.state.borrow().query.is_empty();
+        let caret_on = self.caret_on && self.visible && (!self.state.borrow().query.is_empty() || !self.ime_preedit.is_empty());
         {
             let canvas = self.renderer.canvas();
             let mut state = self.state.borrow_mut();
-            paint_scene(canvas, &theme, &layout, &mut state, &self.fonts, alpha, caret_on);
+            paint_scene(
+                canvas,
+                &theme,
+                &layout,
+                &mut state,
+                &self.fonts,
+                alpha,
+                caret_on,
+                &self.ime_preedit,
+            );
         }
 
         // 呈现喵
@@ -515,8 +544,8 @@ impl WindowHandler for Launcher {
             WindowEvent::Hotkey => self.toggle(),
             WindowEvent::KeyDown(key) => self.on_key(key),
             WindowEvent::Char(ch) => self.on_char(ch),
+            WindowEvent::ImePreedit(text) => self.on_ime_preedit(text),
             WindowEvent::MouseDown(x, y) => self.on_mouse_down(x, y),
-            // 启动器第一阶段不处理滚轮,忽略喵
             WindowEvent::MouseWheel(_) => {}
             WindowEvent::LostFocus => {
                 if self.visible {
@@ -524,8 +553,8 @@ impl WindowHandler for Launcher {
                 }
             }
             WindowEvent::Timer => self.tick(),
-            // 启动器窗口不响应关闭(常驻后台)喵
             WindowEvent::Close => {}
+            WindowEvent::FilesDropped(_) => {}
         }
     }
 }

@@ -335,12 +335,11 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_fallback_for_mixed() {
-        // 中英混合应用名也要能搜喵
-        let reg = make_registry();
-        let mut engine = SearchEngine::new();
-        engine.sync(&reg.apps);
-        let results = engine.search(&reg, "google");
-        assert!(results.iter().any(|a| a.name == "Google Chrome"));
+    fn parse_prefixes() {
+        let t = ParsedQuery::parse("t: 浏览器");
+        assert_eq!(t.mode, SearchMode::Tag);
+        let i = ParsedQuery::parse("i: z");
+        assert_eq!(i.mode, SearchMode::Initial);
+        assert_eq!(i.initials, vec!['z']);
     }
 }

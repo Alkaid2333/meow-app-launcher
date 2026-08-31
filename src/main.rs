@@ -27,6 +27,12 @@ use std::rc::Rc;
 use window::{Launcher, SettingsWindow, Tray};
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(|s| s.as_str()) == Some("register") {
+        cli_register(&args[1..]);
+        return;
+    }
+
     // 数据目录: ./.datas 喵
     let data_dir = std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
@@ -70,4 +76,73 @@ fn main() {
     platform.destroy_tray(&tray);
     platform.destroy_window(&launcher_window);
     platform.destroy_window(&settings_window);
+}
+
+/// `meowal register <名称> <路径> [-ico 图标]` 喵
+fn cli_register(args: &[String]) {
+    let data_dir = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(app::config::DATA_DIR_NAME);
+    let _ = std::fs::create_dir_all(&data_dir);
+
+    let parsed = parse_register_args(args);
+    let Some((name, path, icon)) = parsed else {
+        eprintln!("用法: meowal register <应用名称> <可执行路径> [-ico 图标路径]");
+        std::process::exit(1);
+    };
+    if !std::path::Path::new(&path).exists() {
+        eprintln!("路径不存在: {path}");
+        std::process::exit(1);
+    }
+    let mut registry = apps::AppRegistry::load(&data_dir);
+    let mut app_info = apps::AppInfo::manual(&name, &path);
+    app_info.icon_path = icon;
+    registry.upsert(app_info);
+    registry.save(&data_dir);
+    println!("已注册: {name} → {path}");
+}
+
+fn parse_register_args(args: &[String]) -> Option<(String, String, Option<String>)> {
+    if args.len() < 2 {
+        return None;
+    }
+    let name = args[0].clone();
+    let path = args[1].clone();
+    let mut icon = None;
+    let mut i = 2;
+    while i < args.len() {
+        if args[i] == "-ico" {
+            icon = args.get(i + 1).cloned();
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    Some((name, path, icon))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_register_args;
+
+    #[test]
+    fn parse_register_basic() {
+        let args = ["记事本".into(), "C:/Windows/notepad.exe".into()];
+        let (name, path, ico) = parse_register_args(&args).unwrap();
+        assert_eq!(name, "记事本");
+        assert_eq!(path, "C:/Windows/notepad.exe");
+        assert!(ico.is_none());
+    }
+
+    #[test]
+    fn parse_register_with_ico() {
+        let args = [
+            "Chrome".into(),
+            "C:/chrome.exe".into(),
+            "-ico".into(),
+            "C:/icon.png".into(),
+        ];
+        let (_, _, ico) = parse_register_args(&args).unwrap();
+        assert_eq!(ico.as_deref(), Some("C:/icon.png"));
+    }
 }

@@ -90,7 +90,7 @@ pub enum Key {
 }
 
 /// 平台无关窗口事件喵
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum WindowEvent {
     /// 全局热键触发喵
     Hotkey,
@@ -98,6 +98,8 @@ pub enum WindowEvent {
     KeyDown(Key),
     /// 字符输入喵
     Char(char),
+    /// IME 预编辑串(未提交)喵
+    ImePreedit(String),
     /// 鼠标按下(客户区物理坐标)喵
     MouseDown(f32, f32),
     /// 鼠标滚轮(正=向上)喵
@@ -108,6 +110,8 @@ pub enum WindowEvent {
     Timer,
     /// 请求关闭喵
     Close,
+    /// 拖入文件(路径列表)喵
+    FilesDropped(Vec<String>),
 }
 
 /// 窗口事件处理器(由业务层实现)喵
@@ -164,6 +168,12 @@ pub trait Platform: Send + Sync {
     /// 显示/隐藏窗口喵
     fn show_window(&self, window: &PlatformWindow, show: bool);
 
+    /// 把窗口拉到前台喵
+    fn focus_window(&self, window: &PlatformWindow);
+
+    /// 允许向窗口拖入文件喵
+    fn enable_file_drop(&self, window: &PlatformWindow);
+
     /// 最小化窗口喵(配置窗口的黄点)喵
     fn minimize_window(&self, window: &PlatformWindow);
 
@@ -175,9 +185,6 @@ pub trait Platform: Send + Sync {
 
     /// 设置定时器喵(驱动动画帧,间隔毫秒)喵
     fn set_timer(&self, window: &PlatformWindow, interval_ms: u32);
-
-    /// 停止定时器喵
-    fn kill_timer(&self, window: &PlatformWindow);
 
     /// 创建系统托盘图标喵(不绑定事件处理器)喵
     fn create_tray(&self) -> Option<TrayHandle>;
