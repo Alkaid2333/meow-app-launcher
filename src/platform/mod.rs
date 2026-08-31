@@ -4,9 +4,10 @@
 //! 向上只暴露 trait 与平台无关类型,业务代码永远不直接碰平台 API 喵。
 //!
 //! 职责边界:
-//! * 窗口生命周期(创建/显示/移动/缩放/销毁)喵
+//! * 窗口生命周期(创建/显示/移动/缩放/销毁),支持多窗口喵
 //! * 每像素透明呈现(per-pixel alpha)喵
-//! * 消息泵(把 WM_* 翻译成平台无关事件)喵
+//! * 全局消息泵(把 WM_* 翻译成平台无关事件,分发给各窗口 handler)喵
+//! * 系统托盘(图标/菜单/事件)喵
 //! * 全局热键、图标提取、应用启动喵
 
 pub mod win32;
@@ -56,6 +57,20 @@ impl PlatformWindow {
     }
 }
 
+/// 系统托盘句柄喵(不透明)喵
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// 系统托盘句柄喵(单托盘,仅作令牌标识)喵
+pub struct TrayHandle;
+
+/// 托盘菜单项喵
+#[derive(Debug, Clone)]
+pub struct TrayMenuItem {
+    /// 菜单项文本喵
+    pub label: String,
+    /// 是否可点击喵
+    pub enabled: bool,
+}
+
 /// 导航键喵(平台无关)喵
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -85,6 +100,8 @@ pub enum WindowEvent {
     Char(char),
     /// 鼠标按下(客户区物理坐标)喵
     MouseDown(f32, f32),
+    /// 鼠标滚轮(正=向上)喵
+    MouseWheel(f32),
     /// 窗口失去激活(前台切走)喵
     LostFocus,
     /// 定时器触发(动画帧驱动)喵
@@ -99,6 +116,21 @@ pub trait WindowHandler {
     fn on_event(&mut self, event: WindowEvent);
 }
 
+/// 托盘事件喵
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayEvent {
+    /// 单击托盘图标(显示/隐藏切换)喵
+    LeftClick,
+    /// 托盘菜单项点击(索引)喵
+    Menu(usize),
+}
+
+/// 托盘事件处理器(由业务层实现)喵
+pub trait TrayHandler {
+    /// 处理一个托盘事件喵
+    fn on_event(&mut self, event: TrayEvent);
+}
+
 /// 平台能力接口喵
 pub trait Platform: Send + Sync {
     /// 从文件路径提取图标像素喵,失败返回 None(渲染层兜底字符图标)喵
@@ -108,12 +140,6 @@ pub trait Platform: Send + Sync {
     fn launch(&self, path: &str) -> bool;
 
     /// 注册全局热键喵,触发时向 `target` 窗口投递 Hotkey 事件喵
-    ///
-    /// * `modifiers` - 修饰键,如 "ctrl+alt" 喵
-    /// * `key` - 主键,如 "space" 喵
-    /// * `target` - 热键触发的目标窗口喵
-    ///
-    /// 返回是否注册成功喵
     fn register_global_hotkey(
         &self,
         modifiers: &str,
@@ -124,14 +150,22 @@ pub trait Platform: Send + Sync {
     /// 取消全局热键喵
     fn unregister_global_hotkey(&self);
 
-    /// 创建异形透明置顶窗口喵
+    /// 创建异形透明置顶窗口喵(不绑定事件处理器)喵
     fn create_window(&self, spec: &WindowSpec) -> Option<PlatformWindow>;
+
+    /// 绑定窗口事件处理器喵(窗口创建后调用一次)喵
+    ///
+    /// `handler` 的所有权转移给平台层,窗口销毁时自动回收喵。
+    fn set_window_handler(&self, window: &PlatformWindow, handler: Box<dyn WindowHandler>);
 
     /// 销毁窗口喵
     fn destroy_window(&self, window: &PlatformWindow);
 
     /// 显示/隐藏窗口喵
     fn show_window(&self, window: &PlatformWindow, show: bool);
+
+    /// 最小化窗口喵(配置窗口的黄点)喵
+    fn minimize_window(&self, window: &PlatformWindow);
 
     /// 调整窗口尺寸(物理像素)喵
     fn resize_window(&self, window: &PlatformWindow, width: i32, height: i32);
@@ -145,8 +179,29 @@ pub trait Platform: Send + Sync {
     /// 停止定时器喵
     fn kill_timer(&self, window: &PlatformWindow);
 
-    /// 进入消息循环喵,阻塞直到窗口关闭喵
-    fn run_message_loop(&self, window: &PlatformWindow, handler: &mut dyn WindowHandler);
+    /// 创建系统托盘图标喵(不绑定事件处理器)喵
+    fn create_tray(&self) -> Option<TrayHandle>;
+
+    /// 绑定托盘事件处理器喵(托盘创建后调用一次)喵
+    fn set_tray_handler(&self, tray: &TrayHandle, handler: Box<dyn TrayHandler>);
+
+    /// 移除托盘图标喵
+    fn destroy_tray(&self, tray: &TrayHandle);
+
+    /// 更新托盘图标(BGRA 像素)喵
+    fn set_tray_icon(&self, tray: &TrayHandle, width: u32, height: u32, bgra: &[u8]);
+
+    /// 更新托盘提示文本喵
+    fn set_tray_tip(&self, tray: &TrayHandle, tip: &str);
+
+    /// 更新托盘菜单项喵(右键托盘图标时自动弹出)喵
+    fn set_tray_menu(&self, tray: &TrayHandle, items: Vec<TrayMenuItem>);
+
+    /// 进入全局消息循环喵,阻塞直到收到退出请求喵
+    fn run(&self);
+
+    /// 请求退出消息循环喵
+    fn quit(&self);
 
     /// 系统 DPI 缩放系数喵(1.0 = 100%)喵
     fn scale_factor(&self) -> f32;
@@ -166,7 +221,7 @@ pub fn platform() -> std::sync::Arc<dyn Platform> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        // 非 Windows 平台第一阶段不实现,后续补喵
-        compile_error!("第一阶段仅支持 Windows,后续再支持 Linux/macOS 喵~");
+        // 非 Windows 平台暂不实现,后续补喵
+        compile_error!("暂仅支持 Windows,后续再支持 Linux/macOS 喵~");
     }
 }

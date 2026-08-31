@@ -10,6 +10,7 @@
 pub mod font;
 pub mod layout;
 pub mod paint;
+pub mod settings;
 pub mod shape;
 pub mod text;
 pub mod theme;
@@ -17,7 +18,7 @@ pub mod theme;
 pub use font::FontCache;
 pub use layout::Layout;
 pub use paint::paint_scene;
-pub use theme::Theme;
+pub use theme::{SettingsTheme, Theme};
 
 use skia_safe::{AlphaType, Canvas, ColorType, ImageInfo, Surface, image::CachingHint, surfaces};
 

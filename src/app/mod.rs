@@ -13,8 +13,28 @@ use crate::apps::{AppInfo, AppRegistry, icon::IconManager};
 use crate::app::config::AppConfig;
 use crate::platform::Platform;
 use crate::search::SearchEngine;
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
+
+/// 共享应用状态喵(单线程消息循环,用 Rc<RefCell> 跨窗口共享)喵
+pub type SharedState = Rc<RefCell<AppState>>;
+
+/// 应用级命令喵(托盘/配置窗口触发,主窗口消息循环里执行)喵
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Command {
+    /// 呼出/隐藏启动器喵
+    ToggleLauncher,
+    /// 打开配置窗口喵
+    OpenSettings,
+    /// 重新扫描系统应用喵
+    Rescan,
+    /// 重启应用喵
+    Restart,
+    /// 退出应用喵
+    Quit,
+}
 
 /// 全局应用状态喵
 pub struct AppState {
@@ -40,17 +60,20 @@ pub struct AppState {
     pub selected: usize,
     /// 是否有结果需要展开面板喵
     pub results_visible: bool,
+    /// 启动器是否可见喵(供托盘菜单动态文本)喵
+    pub launcher_visible: bool,
+    /// 配置窗口是否应显示喵(供配置窗口心跳检测)喵
+    pub settings_visible: bool,
 }
 
 impl AppState {
     /// 初始化应用状态喵,并确保数据目录存在喵~
-    pub fn new(data_dir: PathBuf) -> Self {
+    pub fn new(platform: Arc<dyn Platform>, data_dir: PathBuf) -> Self {
         // 确保数据目录存在喵
         if let Err(e) = std::fs::create_dir_all(&data_dir) {
             log::error!("创建数据目录失败: {e}");
         }
 
-        let platform = crate::platform::platform();
         let config = AppConfig::load(&data_dir);
         let registry = AppRegistry::load(&data_dir);
         let mut search = SearchEngine::new();
@@ -74,6 +97,8 @@ impl AppState {
             results: Vec::new(),
             selected: 0,
             results_visible: false,
+            launcher_visible: false,
+            settings_visible: false,
         }
     }
 
