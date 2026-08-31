@@ -107,17 +107,54 @@ impl Default for WindowConfig {
     }
 }
 
+/// 浮窗背景材质喵(分层窗上用 Skia 拟真,贴不上系统云母)喵
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Backdrop {
+    /// 不透明喵
+    #[default]
+    Opaque,
+    /// 云母拟真(半透明 + 细噪点)喵
+    Mica,
+    /// 毛玻璃拟真(更透 + 密噪点)喵
+    Acrylic,
+}
+
+impl Backdrop {
+    /// 循环切换材质喵
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Opaque => Self::Mica,
+            Self::Mica => Self::Acrylic,
+            Self::Acrylic => Self::Opaque,
+        }
+    }
+
+    /// 给配置 GUI 看的名字喵
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Opaque => "不透明",
+            Self::Mica => "云母",
+            Self::Acrylic => "毛玻璃",
+        }
+    }
+}
+
 /// 主题配置喵
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThemeConfig {
     /// 主题模式喵
     pub mode: ThemeMode,
+    /// 浮窗背景材质喵
+    #[serde(default)]
+    pub backdrop: Backdrop,
 }
 
 impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
             mode: ThemeMode::Light,
+            backdrop: Backdrop::Opaque,
         }
     }
 }

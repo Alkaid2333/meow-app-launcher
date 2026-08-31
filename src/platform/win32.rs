@@ -28,6 +28,12 @@ const WM_MEOW_HOTKEY: u32 = 0x8000 + 1;
 const TIMER_ID: usize = 1;
 /// 托盘回调消息(WM_USER + 1)喵
 const WM_TRAY_MSG: u32 = 0x0400 + 1;
+/// 托盘图标被选中(Win2000+,左键单击)喵
+const NIN_SELECT: u32 = 0x0400;
+/// IME 组字消息喵
+const WM_IME_COMPOSITION: u32 = 0x010F;
+/// 拖入文件消息喵
+const WM_DROPFILES: u32 = 0x0233;
 /// 窗口类名(UTF-16 编码,含 null 终止)喵
 const CLASS_NAME: [u16; 19] = [
     0x4D, 0x65, 0x6F, 0x77, // "Meow"
@@ -178,6 +184,7 @@ impl Platform for Win32Platform {
                 log::error!("创建窗口失败喵");
                 None
             } else {
+                associate_ime(hwnd);
                 log::debug!("窗口创建成功: hwnd={} 喵", hwnd as usize);
                 Some(PlatformWindow::from_hwnd(hwnd as usize))
             }
@@ -199,7 +206,22 @@ impl Platform for Win32Platform {
     fn show_window(&self, window: &PlatformWindow, show: bool) {
         use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOW};
         unsafe {
+            // SW_SHOWNA: 显示但不抢焦点,避免分层窗闪一下又失焦喵
             ShowWindow(window.hwnd() as HWND, if show { SW_SHOW } else { SW_HIDE });
+        }
+    }
+
+    fn focus_window(&self, window: &PlatformWindow) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+        unsafe {
+            SetForegroundWindow(window.hwnd() as HWND);
+        }
+    }
+
+    fn enable_file_drop(&self, window: &PlatformWindow) {
+        use windows_sys::Win32::UI::Shell::DragAcceptFiles;
+        unsafe {
+            DragAcceptFiles(window.hwnd() as HWND, 1);
         }
     }
 
@@ -235,13 +257,6 @@ impl Platform for Win32Platform {
         use windows_sys::Win32::UI::WindowsAndMessaging::SetTimer;
         unsafe {
             SetTimer(window.hwnd() as HWND, TIMER_ID, interval_ms, None);
-        }
-    }
-
-    fn kill_timer(&self, window: &PlatformWindow) {
-        use windows_sys::Win32::UI::WindowsAndMessaging::KillTimer;
-        unsafe {
-            KillTimer(window.hwnd() as HWND, TIMER_ID);
         }
     }
 
@@ -422,12 +437,12 @@ impl Platform for Win32Platform {
 
 /// 主窗口消息处理喵
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    use windows_sys::Win32::Graphics::Gdi::ValidateRect;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_BACK;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         DefWindowProcW, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEWHEEL,
         WM_NCDESTROY, WM_PAINT, WM_TIMER,
     };
-    use windows_sys::Win32::Graphics::Gdi::ValidateRect;
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_BACK;
 
     match msg {
         // 热键触发(热键线程 PostMessage 过来)喵
@@ -447,14 +462,19 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             }
             0
         }
-        // 字符输入喵
+        // 字符输入喵(IME 提交字也会走这里,GCS_RESULTSTR 是兜底)喵
         WM_CHAR => {
             let code = wparam as u32;
-            // 过滤控制字符,只保留可打印字符喵
-            if code >= 0x20 && code != 0x7f
+            // 只收 ASCII 可打印字符; 中文由 GCS_RESULTSTR 提交,避免重复喵
+            if (0x20..0x7F).contains(&code)
                 && let Some(ch) = char::from_u32(code) {
                     with_window_handler(hwnd, |h| h.on_event(WindowEvent::Char(ch)));
                 }
+            0
+        }
+        // IME 组字: 预览串 + 提交结果喵
+        WM_IME_COMPOSITION => {
+            handle_ime_composition(hwnd, lparam);
             0
         }
         // 鼠标左键按下喵
@@ -467,6 +487,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         WM_MOUSEWHEEL => {
             let delta = ((wparam >> 16) & 0xFFFF) as u16 as i16 as f32;
             with_window_handler(hwnd, |h| h.on_event(WindowEvent::MouseWheel(delta)));
+            0
+        }
+        // 拖入文件喵
+        WM_DROPFILES => {
+            let paths = collect_dropped_files(wparam);
+            if !paths.is_empty() {
+                with_window_handler(hwnd, |h| h.on_event(WindowEvent::FilesDropped(paths)));
+            }
             0
         }
         // 失焦(前台切走)喵
@@ -534,9 +562,11 @@ unsafe extern "system" fn tray_wnd_proc(
         // 托盘回调消息喵
         WM_TRAY_MSG => {
             let event = (lparam & 0xFFFF) as u32;
-            if event == WM_LBUTTONUP {
+            if event == WM_LBUTTONUP || event == NIN_SELECT {
+                log::debug!("托盘左键点击喵");
                 with_tray_handler(|h| h.on_event(TrayEvent::LeftClick));
             } else if event == WM_RBUTTONUP {
+                log::debug!("托盘右键菜单喵");
                 show_tray_menu_impl(hwnd);
             }
             0
@@ -570,7 +600,7 @@ fn show_tray_menu_impl(hwnd: HWND) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, SetForegroundWindow,
         TrackPopupMenu, MF_ENABLED, MF_GRAYED, MF_STRING, TPM_BOTTOMALIGN, TPM_RIGHTALIGN,
-        TPM_RIGHTBUTTON,
+        TPM_RIGHTBUTTON, WM_NULL,
     };
 
     let items = TRAY_STATE.with(|s| {
@@ -607,6 +637,8 @@ fn show_tray_menu_impl(hwnd: HWND) {
             hwnd,
             null_mut(),
         );
+        // 托盘菜单点完后必须再丢一条空消息,否则下次点不开喵
+        windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(hwnd, WM_NULL, 0, 0);
         DestroyMenu(hmenu);
     }
 }
@@ -632,6 +664,91 @@ fn map_key(vk: u16) -> Option<Key> {
         VK_DELETE => Some(Key::Delete),
         _ => None,
     }
+}
+
+/// 给分层窗挂上默认 IME 上下文,否则中文输入法常常出不来喵
+fn associate_ime(hwnd: HWND) {
+    use windows_sys::Win32::UI::Input::Ime::{ImmAssociateContextEx, IACE_DEFAULT};
+    unsafe {
+        ImmAssociateContextEx(hwnd, null_mut(), IACE_DEFAULT);
+    }
+}
+
+/// 处理 IME 组字消息喵: 预览串走 ImePreedit,提交字走 Char喵
+fn handle_ime_composition(hwnd: HWND, lparam: LPARAM) {
+    use windows_sys::Win32::UI::Input::Ime::{
+        ImmGetContext, ImmReleaseContext, GCS_COMPSTR, GCS_RESULTSTR,
+    };
+
+    let himc = unsafe { ImmGetContext(hwnd) };
+    if himc.is_null() {
+        return;
+    }
+
+    let flag = lparam as u32;
+    if flag & GCS_RESULTSTR != 0 {
+        if let Some(text) = ime_string(himc, GCS_RESULTSTR) {
+            for ch in text.chars().filter(|c| !c.is_control()) {
+                with_window_handler(hwnd, |h| h.on_event(WindowEvent::Char(ch)));
+            }
+        }
+        with_window_handler(hwnd, |h| h.on_event(WindowEvent::ImePreedit(String::new())));
+    } else if flag & GCS_COMPSTR != 0 {
+        let text = ime_string(himc, GCS_COMPSTR).unwrap_or_default();
+        with_window_handler(hwnd, |h| h.on_event(WindowEvent::ImePreedit(text)));
+    }
+
+    unsafe {
+        ImmReleaseContext(hwnd, himc);
+    }
+}
+
+/// 从 IME 上下文读宽字符串喵
+fn ime_string(himc: windows_sys::Win32::UI::Input::Ime::HIMC, flag: u32) -> Option<String> {
+    use windows_sys::Win32::UI::Input::Ime::ImmGetCompositionStringW;
+    unsafe {
+        let bytes = ImmGetCompositionStringW(himc, flag, null_mut(), 0);
+        if bytes <= 0 {
+            return Some(String::new());
+        }
+        let units = bytes as usize / 2;
+        let mut buf = vec![0u16; units];
+        let written = ImmGetCompositionStringW(
+            himc,
+            flag,
+            buf.as_mut_ptr() as *mut _,
+            bytes as u32,
+        );
+        if written <= 0 {
+            return None;
+        }
+        let n = (written as usize / 2).min(buf.len());
+        Some(String::from_utf16_lossy(&buf[..n]))
+    }
+}
+
+/// 收集拖入的文件路径喵
+fn collect_dropped_files(wparam: WPARAM) -> Vec<String> {
+    use windows_sys::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
+    let hdrop = wparam as HDROP;
+    let mut paths = Vec::new();
+    unsafe {
+        let count = DragQueryFileW(hdrop, 0xFFFF, null_mut(), 0);
+        for i in 0..count {
+            let len = DragQueryFileW(hdrop, i, null_mut(), 0) as usize;
+            if len == 0 {
+                continue;
+            }
+            let mut buf = vec![0u16; len + 1];
+            DragQueryFileW(hdrop, i, buf.as_mut_ptr(), buf.len() as u32);
+            if let Some(end) = buf.iter().position(|&c| c == 0) {
+                buf.truncate(end);
+            }
+            paths.push(String::from_utf16_lossy(&buf));
+        }
+        DragFinish(hdrop);
+    }
+    paths
 }
 
 /// 从 lparam 提取客户区坐标(物理像素)喵

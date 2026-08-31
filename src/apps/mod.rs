@@ -46,8 +46,7 @@ pub struct AppInfo {
 }
 
 impl AppInfo {
-    /// 新建一个手动注册的应用喵(供 CLI/配置 GUI 使用)喵
-    #[allow(dead_code)]
+    /// 新建一个手动注册的应用喵
     pub fn manual(name: impl Into<String>, path: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -80,7 +79,6 @@ pub struct AppRegistry {
     pub apps: Vec<AppInfo>,
 }
 
-#[allow(dead_code)] // 注册表操作 API 供 CLI/配置 GUI 使用(第二阶段)喵
 impl AppRegistry {
     /// 从磁盘加载应用注册表喵,失败则空表喵~
     pub fn load(data_dir: &Path) -> Self {
@@ -130,15 +128,6 @@ impl AppRegistry {
                 true
             }
         }
-    }
-
-    /// 手动注册一个应用喵(存在同名则更新)喵
-    pub fn register_manual(&mut self, name: &str, path: &str) -> bool {
-        if name.trim().is_empty() || path.trim().is_empty() {
-            log::warn!("手动注册参数不完整: name={name:?} path={path:?}");
-            return false;
-        }
-        self.upsert(AppInfo::manual(name, path))
     }
 
     /// 移除一个应用喵,返回是否成功喵

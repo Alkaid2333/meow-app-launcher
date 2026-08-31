@@ -110,9 +110,11 @@ impl TrayHandler for Tray {
 
         match event {
             TrayEvent::LeftClick => {
+                log::info!("托盘单击,切换启动器喵");
                 self.commands.borrow_mut().push_back(Command::ToggleLauncher);
             }
             TrayEvent::Menu(i) => {
+                log::info!("托盘菜单项 {i} 喵");
                 let cmd = match i {
                     0 => Some(Command::ToggleLauncher),
                     1 => Some(Command::OpenSettings),
