@@ -65,3 +65,84 @@ impl Theme {
         }
     }
 }
+
+/// 配置 GUI 主题色板喵(语义 token,浅色/深色两套)喵
+///
+/// 遵循 window-design skill 的配置 GUI 配色 token 喵。
+#[derive(Debug, Clone, Copy)]
+pub struct SettingsTheme {
+    /// 窗口底色喵
+    pub win_bg: Color,
+    /// 侧边栏底色喵
+    pub sidebar_bg: Color,
+    /// 分组卡片底色喵
+    pub group_bg: Color,
+    /// 主文字喵
+    pub text: Color,
+    /// 次级文字喵
+    pub text_dim: Color,
+    /// 禁用文字喵
+    pub disabled: Color,
+    /// 强调色喵
+    pub accent: Color,
+    /// 危险色(关闭按钮)喵
+    pub danger: Color,
+    /// 开关开启色喵
+    pub toggle_on: Color,
+    /// 开关关闭色喵
+    pub toggle_off: Color,
+    /// 控件背景喵
+    pub control_bg: Color,
+    /// 控件描边喵
+    pub control_border: Color,
+    /// 阴影喵
+    pub shadow: Color,
+}
+
+impl SettingsTheme {
+    /// 按配置模式取主题喵
+    pub fn for_mode(mode: ThemeMode) -> Self {
+        match mode {
+            ThemeMode::Light => Self::light(),
+            ThemeMode::Dark => Self::dark(),
+        }
+    }
+
+    /// 浅色主题喵
+    pub fn light() -> Self {
+        Self {
+            win_bg: Color::from_argb(0xFF, 0xF6, 0xF6, 0xF8),
+            sidebar_bg: Color::from_argb(0xFF, 0xEB, 0xEB, 0xEE),
+            group_bg: Color::from_argb(0xFF, 0xFF, 0xFF, 0xFF),
+            text: Color::from_rgb(0x1C, 0x1C, 0x1E),
+            text_dim: Color::from_rgb(0x5C, 0x5C, 0x61),
+            disabled: Color::from_rgb(0x8E, 0x8E, 0x93),
+            accent: Color::from_rgb(0x00, 0x7A, 0xFF),
+            danger: Color::from_rgb(0xFF, 0x3B, 0x30),
+            toggle_on: Color::from_rgb(0x34, 0xC7, 0x59),
+            toggle_off: Color::from_rgb(0xC7, 0xC7, 0xCC),
+            control_bg: Color::from_argb(0xFF, 0xFF, 0xFF, 0xFF),
+            control_border: Color::from_argb(0x34, 0x00, 0x00, 0x00),
+            shadow: Color::from_argb(0x18, 0x00, 0x00, 0x00),
+        }
+    }
+
+    /// 深色主题喵
+    pub fn dark() -> Self {
+        Self {
+            win_bg: Color::from_rgb(0x1C, 0x1C, 0x1E),
+            sidebar_bg: Color::from_rgb(0x16, 0x16, 0x18),
+            group_bg: Color::from_rgb(0x28, 0x28, 0x2A),
+            text: Color::from_rgb(0xE8, 0xE8, 0xEA),
+            text_dim: Color::from_rgb(0xA0, 0xA0, 0xA4),
+            disabled: Color::from_rgb(0x5C, 0x5C, 0x61),
+            accent: Color::from_rgb(0x0A, 0x84, 0xFF),
+            danger: Color::from_rgb(0xFF, 0x45, 0x3A),
+            toggle_on: Color::from_rgb(0x32, 0xD7, 0x4B),
+            toggle_off: Color::from_rgb(0x4A, 0x4A, 0x4C),
+            control_bg: Color::from_rgb(0x2C, 0x2C, 0x2E),
+            control_border: Color::from_argb(0x28, 0xFF, 0xFF, 0xFF),
+            shadow: Color::from_argb(0x40, 0x00, 0x00, 0x00),
+        }
+    }
+}
