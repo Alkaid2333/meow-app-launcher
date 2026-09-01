@@ -193,11 +193,11 @@ impl SettingsWindow {
         let canvas = self.renderer.canvas();
         canvas.save();
         canvas.scale((self.scale, self.scale));
-        // 三层元组的第三位是「未编辑」标志,渲染层只看 id + 草稿喵
-        let edit_view: Option<(RowId, String)> = self
-            .stepper_edit
-            .as_ref()
-            .map(|(id, draft, _)| (*id, draft.clone()));
+        // 偏离默认值的行: 行首显示「恢复默认」图标喵
+        let dirty = {
+            let state = self.state.borrow();
+            dirty_rows(&state.config)
+        };
         let layout = paint_settings(
             canvas,
             &theme,
@@ -205,8 +205,9 @@ impl SettingsWindow {
             &pages,
             self.current_page,
             self.scroll,
-            edit_view.as_ref(),
+            self.stepper_edit.as_ref(),
             self.hotkey_capture,
+            &dirty,
             self.win_w,
             self.win_h,
         );
@@ -310,8 +311,9 @@ impl SettingsWindow {
             RowHit::Switch(id) => self.toggle_switch(id),
             RowHit::StepperDec(id) => self.adjust_stepper(id, -1),
             RowHit::StepperInc(id) => self.adjust_stepper(id, 1),
-            RowHit::StepperEdit(id) => self.begin_stepper_edit(id),
+            RowHit::StepperEdit(id) => self.handle_stepper_edit(id),
             RowHit::Button(id) => self.press_button(id),
+            RowHit::Restore(id) => self.restore_row_defaults(id),
             RowHit::AppPick(i) => self.pick_app(i),
             RowHit::FavStar(i) => self.toggle_fav(i),
             RowHit::Chip(i) => self.remove_chip(i),
@@ -327,6 +329,33 @@ impl SettingsWindow {
         let cur = self.stepper_value(id);
         self.stepper_edit = Some((id, cur.to_string(), true));
         log::debug!("数值键入开始: {id:?} 起点={cur} 喵");
+    }
+
+    /// 点击数值框: 首次点击进入键入(全选态),再次点击/拖动重新全选喵
+    fn handle_stepper_edit(&mut self, id: RowId) {
+        if self.stepper_edit.as_ref().is_some_and(|(eid, _, _)| *eid == id) {
+            if let Some((_, _, pristine)) = self.stepper_edit.as_mut() {
+                *pristine = true; // 重新全选,再键入整体替换喵
+            }
+        } else {
+            self.begin_stepper_edit(id);
+        }
+    }
+
+    /// 恢复单个配置项到默认值喵
+    fn restore_row_defaults(&mut self, id: RowId) {
+        // 正在键入同一行时先退出编辑态,避免草稿过期喵
+        if self.stepper_edit.as_ref().is_some_and(|(eid, _, _)| *eid == id) {
+            self.stepper_edit = None;
+        }
+        let mut state = self.state.borrow_mut();
+        if restore_default(id, &mut state.config) {
+            state.persist();
+            log::info!("已恢复 {id:?} 到默认值喵~");
+            if id == RowId::HotkeyEnabled {
+                self.commands.borrow_mut().push_back(Command::ReapplyHotkey);
+            }
+        }
     }
 
     /// 读取某数值行的当前显示值喵
@@ -812,7 +841,144 @@ fn spring_at(i: u8) -> IslandTransition {
 }
 
 fn spring_label(i: u8) -> &'static str {
-    spring_at(i).label()
+    match spring_at(i) {
+        IslandTransition::Summon => "唤出",
+        IslandTransition::Dismiss => "收回",
+        IslandTransition::Expand => "展开",
+        IslandTransition::Collapse => "收起",
+        IslandTransition::SummonExpanded => "直达展开",
+        IslandTransition::DismissExpanded => "直达收回",
+    }
+}
+
+/// 走查所有可调配置项,返回偏离默认值的行喵
+fn dirty_rows(cfg: &AppConfig) -> Vec<RowId> {
+    let d = AppConfig::default();
+    let mut rows = vec![
+        RowId::Theme,
+        RowId::AnimFps,
+        RowId::MotionMode,
+        RowId::Easing,
+        RowId::AutoMorph,
+        RowId::Draggable,
+        RowId::ReduceMotion,
+        RowId::IslandW,
+        RowId::IslandH,
+        RowId::IslandX,
+        RowId::IslandY,
+        RowId::ExpandedW,
+        RowId::ExpandedH,
+        RowId::ExpandedR,
+        RowId::InputRatio,
+        RowId::Margin,
+        RowId::Squash,
+        RowId::IconSize,
+        RowId::AlwaysOnTop,
+        RowId::HotkeyEnabled,
+        RowId::ShowRecent,
+        RowId::ShowFavorites,
+        RowId::ShowFrequent,
+        RowId::ShowAll,
+        RowId::SearchMode,
+        RowId::AppLayout,
+    ];
+    rows.extend((0..6u8).map(RowId::SpringDuration));
+    rows.extend((0..6u8).map(RowId::SpringBounce));
+    rows.retain(|id| row_is_dirty(*id, cfg, &d));
+    rows
+}
+
+/// 判断某个配置项是否偏离默认值喵
+fn row_is_dirty(id: RowId, cfg: &AppConfig, d: &AppConfig) -> bool {
+    match id {
+        RowId::Theme => cfg.theme.preset != d.theme.preset,
+        RowId::AnimFps => cfg.island.anim_fps != d.island.anim_fps,
+        RowId::MotionMode => cfg.island.motion_mode != d.island.motion_mode,
+        RowId::Easing => cfg.island.easing != d.island.easing,
+        RowId::AutoMorph => cfg.island.auto_morph != d.island.auto_morph,
+        RowId::Draggable => cfg.island.draggable != d.island.draggable,
+        RowId::ReduceMotion => cfg.island.reduce_motion != d.island.reduce_motion,
+        RowId::IslandW => neq(cfg.island.width, d.island.width),
+        RowId::IslandH => neq(cfg.island.height, d.island.height),
+        RowId::IslandX => neq(cfg.island.x, d.island.x),
+        RowId::IslandY => neq(cfg.island.y, d.island.y),
+        RowId::ExpandedW => neq(cfg.island.expanded_width, d.island.expanded_width),
+        RowId::ExpandedH => neq(cfg.island.expanded_height, d.island.expanded_height),
+        RowId::ExpandedR => neq(cfg.island.expanded_radius, d.island.expanded_radius),
+        RowId::InputRatio => neq(cfg.island.input_ratio, d.island.input_ratio),
+        RowId::Margin => neq(cfg.island.margin, d.island.margin),
+        RowId::Squash => neq(cfg.island.summon_squash, d.island.summon_squash),
+        RowId::IconSize => (cfg.window.icon_size - d.window.icon_size).abs() > f32::EPSILON,
+        RowId::AlwaysOnTop => cfg.window.always_on_top != d.window.always_on_top,
+        RowId::HotkeyEnabled => cfg.hotkey.enabled != d.hotkey.enabled,
+        RowId::ShowRecent => cfg.window.show_recent != d.window.show_recent,
+        RowId::ShowFavorites => cfg.window.show_favorites != d.window.show_favorites,
+        RowId::ShowFrequent => cfg.window.show_frequent != d.window.show_frequent,
+        RowId::ShowAll => cfg.window.show_all != d.window.show_all,
+        RowId::SearchMode => cfg.search.default_mode != d.search.default_mode,
+        RowId::AppLayout => cfg.window.layout != d.window.layout,
+        RowId::SpringDuration(i) => {
+            cfg.island.springs.get(spring_at(i)) != d.island.springs.get(spring_at(i))
+        }
+        RowId::SpringBounce(i) => {
+            cfg.island.springs.get(spring_at(i)) != d.island.springs.get(spring_at(i))
+        }
+        _ => false,
+    }
+}
+
+/// 把单个配置项恢复为默认值,返回是否有对应项喵
+fn restore_default(id: RowId, cfg: &mut AppConfig) -> bool {
+    let d = AppConfig::default();
+    match id {
+        RowId::Theme => cfg.theme = d.theme,
+        RowId::AnimFps => cfg.island.anim_fps = d.island.anim_fps,
+        RowId::MotionMode => cfg.island.motion_mode = d.island.motion_mode,
+        RowId::Easing => cfg.island.easing = d.island.easing,
+        RowId::AutoMorph => cfg.island.auto_morph = d.island.auto_morph,
+        RowId::Draggable => cfg.island.draggable = d.island.draggable,
+        RowId::ReduceMotion => cfg.island.reduce_motion = d.island.reduce_motion,
+        RowId::IslandW => cfg.island.width = d.island.width,
+        RowId::IslandH => cfg.island.height = d.island.height,
+        RowId::IslandX => cfg.island.x = d.island.x,
+        RowId::IslandY => cfg.island.y = d.island.y,
+        RowId::ExpandedW => {
+            cfg.island.expanded_width = d.island.expanded_width;
+            cfg.window.width = d.window.width;
+        }
+        RowId::ExpandedH => {
+            cfg.island.expanded_height = d.island.expanded_height;
+            cfg.window.height = d.window.height;
+        }
+        RowId::ExpandedR => cfg.island.expanded_radius = d.island.expanded_radius,
+        RowId::InputRatio => cfg.island.input_ratio = d.island.input_ratio,
+        RowId::Margin => cfg.island.margin = d.island.margin,
+        RowId::Squash => cfg.island.summon_squash = d.island.summon_squash,
+        RowId::IconSize => cfg.window.icon_size = d.window.icon_size,
+        RowId::AlwaysOnTop => cfg.window.always_on_top = d.window.always_on_top,
+        RowId::HotkeyEnabled => cfg.hotkey.enabled = d.hotkey.enabled,
+        RowId::ShowRecent => cfg.window.show_recent = d.window.show_recent,
+        RowId::ShowFavorites => cfg.window.show_favorites = d.window.show_favorites,
+        RowId::ShowFrequent => cfg.window.show_frequent = d.window.show_frequent,
+        RowId::ShowAll => cfg.window.show_all = d.window.show_all,
+        RowId::SearchMode => cfg.search.default_mode = d.search.default_mode,
+        RowId::AppLayout => cfg.window.layout = d.window.layout,
+        RowId::SpringDuration(i) => {
+            let t = spring_at(i);
+            *cfg.island.springs.get_mut(t) = d.island.springs.get(t);
+        }
+        RowId::SpringBounce(i) => {
+            let t = spring_at(i);
+            *cfg.island.springs.get_mut(t) = d.island.springs.get(t);
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// f64 比较(容差)喵
+fn neq(a: f64, b: f64) -> bool {
+    (a - b).abs() > 1e-9
 }
 
 /// 动画帧率档位循环: 0(跟随屏刷) → 30 → 60 → 90 → 120 → 144 喵

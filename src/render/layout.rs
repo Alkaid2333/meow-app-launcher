@@ -159,13 +159,20 @@ fn list_rects(panel: &Rect, count: usize, scroll_offset: f32, s: f32) -> Vec<Rec
     rects
 }
 
+/// 网格模式列数(输入面板逻辑宽度),供布局与键盘导航共用喵
+pub fn grid_cols(panel_logical_width: f32) -> usize {
+    let gap = GRID_GAP;
+    let cell = GRID_MIN_CELL_W;
+    let item_w = (panel_logical_width - LIST_GUTTER_PX).max(cell);
+    (((item_w + gap) / (cell + gap)).floor() as usize).max(1)
+}
+
 /// 网格排版: 分组头占整行,应用按 `min 单元格宽` 自动算列数,行满换行喵
 fn grid_rects(panel: &Rect, sections: &[bool], scroll_offset: f32, s: f32) -> Vec<Rect> {
     let gap = GRID_GAP * s;
-    let cell_w = GRID_MIN_CELL_W * s;
     let cell_h = GRID_CELL_H * s;
     let item_w = panel.width() - LIST_GUTTER_PX;
-    let cols = (((item_w + gap) / (cell_w + gap)).floor() as usize).max(1);
+    let cols = grid_cols(panel.width() / s);
     let cell_stretch = (item_w - gap * (cols as f32 - 1.0)) / cols as f32;
 
     let mut rects = Vec::with_capacity(sections.len());
