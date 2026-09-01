@@ -112,6 +112,13 @@ pub enum WindowEvent {
     LostFocus,
     /// 定时器触发(动画帧驱动)喵
     Timer,
+    /// 按键组合喵(修饰键 + 主键,供配置 GUI 录制热键使用)喵
+    HotkeyChord {
+        /// 修饰键,如 "ctrl+alt" 喵
+        modifiers: String,
+        /// 主键,如 "space" / "b" / "f5" 喵
+        key: String,
+    },
     /// 请求关闭喵
     Close,
     /// 拖入文件(路径列表)喵
@@ -178,9 +185,6 @@ pub trait Platform: Send + Sync {
     /// 允许向窗口拖入文件喵
     fn enable_file_drop(&self, window: &PlatformWindow);
 
-    /// 最小化窗口喵(配置窗口的黄点)喵
-    fn minimize_window(&self, window: &PlatformWindow);
-
     /// 调整窗口尺寸(物理像素)喵
     fn resize_window(&self, window: &PlatformWindow, width: i32, height: i32);
 
@@ -220,8 +224,11 @@ pub trait Platform: Send + Sync {
     /// 系统 DPI 缩放系数喵(1.0 = 100%)喵
     fn scale_factor(&self) -> f32;
 
-    /// 主屏尺寸(物理像素)喵
+    /// 屏幕尺寸(物理像素)喵
     fn screen_size(&self) -> (i32, i32);
+
+    /// 显示器刷新率(Hz),用于对齐动画帧节奏喵
+    fn display_refresh_rate(&self) -> u32;
 
     /// 平台名,用于日志喵
     fn platform_name(&self) -> &'static str;

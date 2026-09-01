@@ -44,6 +44,8 @@ pub enum Command {
     Rescan,
     /// 重启应用喵
     Restart,
+    /// 热键配置变更,重新注册全局热键喵
+    ReapplyHotkey,
     /// 退出应用喵
     Quit,
 }

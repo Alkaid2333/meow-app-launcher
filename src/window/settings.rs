@@ -57,6 +57,10 @@ pub struct SettingsWindow {
     tag_draft: String,
     /// 是否正在编辑标签喵
     tag_focus: bool,
+    /// 正在手动键入的数值行(id + 草稿)喵
+    stepper_edit: Option<(RowId, String)>,
+    /// 是否正在录制全局热键喵
+    hotkey_capture: bool,
 }
 
 impl SettingsWindow {
@@ -108,6 +112,8 @@ impl SettingsWindow {
             selected_app: None,
             tag_draft: String::new(),
             tag_focus: false,
+            stepper_edit: None,
+            hotkey_capture: false,
         };
 
         platform.set_window_handler(&window, Box::new(settings));
@@ -152,6 +158,7 @@ impl SettingsWindow {
                 &state.registry.apps,
                 self.selected_app.as_deref(),
                 &self.tag_draft,
+                self.hotkey_capture,
             )
         };
         let theme = {
@@ -162,7 +169,16 @@ impl SettingsWindow {
         let canvas = self.renderer.canvas();
         canvas.save();
         canvas.scale((self.scale, self.scale));
-        let layout = paint_settings(canvas, &theme, &self.fonts, &pages, self.current_page, self.scroll);
+        let layout = paint_settings(
+            canvas,
+            &theme,
+            &self.fonts,
+            &pages,
+            self.current_page,
+            self.scroll,
+            self.stepper_edit.as_ref(),
+            self.hotkey_capture,
+        );
         canvas.restore();
         self.layout = Some(layout);
         self.pages = pages;
@@ -206,13 +222,14 @@ impl SettingsWindow {
             RowHit::Nav(i) => {
                 self.current_page = i;
                 self.scroll = 0.0;
+                self.stepper_edit = None;
+                self.hotkey_capture = false;
             }
-            RowHit::TrafficLight(0) => self.hide(),
-            RowHit::TrafficLight(1) => self.platform.minimize_window(&self.window),
-            RowHit::TrafficLight(_) => {}
+            RowHit::Close => self.hide(),
             RowHit::Switch(id) => self.toggle_switch(id),
             RowHit::StepperDec(id) => self.adjust_stepper(id, -1),
             RowHit::StepperInc(id) => self.adjust_stepper(id, 1),
+            RowHit::StepperEdit(id) => self.begin_stepper_edit(id),
             RowHit::Button(id) => self.press_button(id),
             RowHit::AppPick(i) => self.pick_app(i),
             RowHit::FavStar(i) => self.toggle_fav(i),
@@ -220,6 +237,32 @@ impl SettingsWindow {
             RowHit::Input(_) => self.tag_focus = true,
         }
         self.render();
+    }
+
+    /// 进入数值手动键入喵: 以当前值作为草稿起点喵
+    fn begin_stepper_edit(&mut self, id: RowId) {
+        let cur = self.stepper_value(id);
+        self.stepper_edit = Some((id, cur.to_string()));
+        log::debug!("数值键入开始: {id:?} 起点={cur} 喵");
+    }
+
+    /// 读取某数值行的当前显示值喵
+    fn stepper_value(&self, id: RowId) -> i32 {
+        let Some(page) = self.pages.get(self.current_page) else {
+            return 0;
+        };
+        for group in &page.groups {
+            for row in &group.rows {
+                if let SettingsRow::Stepper {
+                    id: rid, value, ..
+                } = row
+                    && *rid == id
+                {
+                    return *value;
+                }
+            }
+        }
+        0
     }
 
     /// 切换开关喵
@@ -252,56 +295,70 @@ impl SettingsWindow {
         log::debug!("开关 {id:?} 已热写配置喵");
     }
 
-    /// 步进调节喵
-    fn adjust_stepper(&mut self, id: RowId, delta: i32) {
-        let (min, max) = self.stepper_range(id);
+    /// 步进调节喵: 按行配置的步幅增减喵
+    fn adjust_stepper(&mut self, id: RowId, dir: i32) {
+        // 若正在手动键入同一行,先退出键入态,避免草稿与最新值错位喵
+        if self.stepper_edit.as_ref().is_some_and(|(eid, _)| *eid == id) {
+            self.stepper_edit = None;
+        }
+        let Some((_, _, step)) = self.stepper_meta(id) else {
+            return;
+        };
+        let cur = self.stepper_value(id) + dir * step;
+        self.apply_stepper(id, cur);
+    }
+
+    /// 手动键入提交: 解析草稿 → 钳制 → 写配置喵
+    fn commit_stepper_edit(&mut self) {
+        let Some((id, draft)) = self.stepper_edit.take() else {
+            return;
+        };
+        match draft.trim().parse::<i32>() {
+            Ok(v) => {
+                self.apply_stepper(id, v);
+                log::debug!("数值键入提交: {id:?} = {v} 喵");
+            }
+            Err(_) => log::warn!("数值键入非法,已放弃: {id:?} = {draft:?} 喵"),
+        }
+    }
+
+    /// 写配置(带范围钳制),有变化时持久化喵
+    fn apply_stepper(&mut self, id: RowId, value: i32) {
+        let (min, max, _) = self.stepper_meta(id).unwrap_or((i32::MIN, i32::MAX, 1));
+        let v = value.clamp(min, max);
         let mut state = self.state.borrow_mut();
         let island = &mut state.config.island;
         let changed = match id {
-            RowId::IslandW => step_f64(&mut island.width, delta, min, max),
-            RowId::IslandH => step_f64(&mut island.height, delta, min, max),
-            RowId::IslandX => step_f64(&mut island.x, delta, min, max),
-            RowId::IslandY => step_f64(&mut island.y, delta, min, max),
+            RowId::IslandW => set_f64(&mut island.width, v),
+            RowId::IslandH => set_f64(&mut island.height, v),
+            RowId::IslandX => set_f64(&mut island.x, v),
+            RowId::IslandY => set_f64(&mut island.y, v),
             RowId::ExpandedW => {
-                let ok = step_f64(&mut island.expanded_width, delta, min, max);
+                let ok = set_f64(&mut island.expanded_width, v);
                 state.config.window.width = island.expanded_width;
                 ok
             }
             RowId::ExpandedH => {
-                let ok = step_f64(&mut island.expanded_height, delta, min, max);
+                let ok = set_f64(&mut island.expanded_height, v);
                 state.config.window.height = island.expanded_height;
                 ok
             }
-            RowId::ExpandedR => step_f64(&mut island.expanded_radius, delta, min, max),
-            RowId::InputRatio => {
-                let mut v = (island.input_ratio * 100.0).round();
-                let ok = step_f64(&mut v, delta, min, max);
-                island.input_ratio = v / 100.0;
-                ok
-            }
-            RowId::Margin => step_f64(&mut island.margin, delta, min, max),
-            RowId::Squash => {
-                let mut v = (island.summon_squash * 100.0).round();
-                let ok = step_f64(&mut v, delta, min, max);
-                island.summon_squash = v / 100.0;
-                ok
-            }
-            RowId::IconSize => step_value(&mut state.config.window.icon_size, delta, min, max),
+            RowId::ExpandedR => set_f64(&mut island.expanded_radius, v),
+            RowId::InputRatio => set_ratio(&mut island.input_ratio, v),
+            RowId::Margin => set_f64(&mut island.margin, v),
+            RowId::Squash => set_ratio(&mut island.summon_squash, v),
+            RowId::IconSize => set_f32(&mut state.config.window.icon_size, v),
             RowId::SpringDuration(i) => {
-                let t = spring_at(i);
-                let tune = island.springs.get_mut(t);
-                let mut v = (tune.duration * 100.0).round();
-                let ok = step_f64(&mut v, delta, min, max);
-                tune.duration = v / 100.0;
-                ok
+                let tune = island.springs.get_mut(spring_at(i));
+                let last = tune.duration;
+                tune.duration = v as f64 / 100.0;
+                (tune.duration - last).abs() > f64::EPSILON
             }
             RowId::SpringBounce(i) => {
-                let t = spring_at(i);
-                let tune = island.springs.get_mut(t);
-                let mut v = (tune.bounce * 100.0).round();
-                let ok = step_f64(&mut v, delta, min, max);
-                tune.bounce = (v / 100.0).clamp(0.0, 0.95);
-                ok
+                let tune = island.springs.get_mut(spring_at(i));
+                let last = tune.bounce;
+                tune.bounce = (v as f64 / 100.0).clamp(0.0, 0.95);
+                (tune.bounce - last).abs() > f64::EPSILON
             }
             _ => false,
         };
@@ -310,27 +367,35 @@ impl SettingsWindow {
         }
     }
 
-    fn stepper_range(&self, id: RowId) -> (f32, f32) {
-        let Some(page) = self.pages.get(self.current_page) else {
-            return (0.0, 0.0);
-        };
+    /// 读取数值行的 (min, max, step) 喵
+    fn stepper_meta(&self, id: RowId) -> Option<(i32, i32, i32)> {
+        let page = self.pages.get(self.current_page)?;
         for group in &page.groups {
             for row in &group.rows {
                 if let SettingsRow::Stepper {
-                    id: rid, min, max, ..
+                    id: rid,
+                    min,
+                    max,
+                    step,
+                    ..
                 } = row
                     && *rid == id
                 {
-                    return (*min as f32, *max as f32);
+                    return Some((*min, *max, *step));
                 }
             }
         }
-        (0.0, 0.0)
+        None
     }
 
     /// 按钮动作喵
     fn press_button(&mut self, id: RowId) {
         match id {
+            RowId::HotkeyRecord => {
+                // 进入录制模式: 等待用户按下新的组合键(Esc 取消)喵
+                self.hotkey_capture = true;
+                log::info!("热键录制中,请按下新组合键喵~");
+            }
             RowId::Backdrop => {
                 let mut state = self.state.borrow_mut();
                 state.config.theme.backdrop = state.config.theme.backdrop.cycle();
@@ -434,6 +499,22 @@ impl SettingsWindow {
     }
 
     fn on_char(&mut self, ch: char) {
+        // 数值键入中: 只收数字与负号喵
+        if self.stepper_edit.is_some() {
+            if ch.is_ascii_digit() || ch == '-' {
+                if let Some((_, draft)) = self.stepper_edit.as_mut() {
+                    // 只允许开头的负号喵
+                    if ch == '-' && !draft.is_empty() {
+                        return;
+                    }
+                    if draft.len() < 8 {
+                        draft.push(ch);
+                    }
+                    self.render();
+                }
+            }
+            return;
+        }
         if !self.tag_focus || ch.is_control() {
             return;
         }
@@ -442,6 +523,24 @@ impl SettingsWindow {
     }
 
     fn on_key(&mut self, key: crate::platform::Key) {
+        // 数值键入中的按键喵
+        if self.stepper_edit.is_some() {
+            match key {
+                crate::platform::Key::Backspace => {
+                    if let Some((_, draft)) = self.stepper_edit.as_mut() {
+                        draft.pop();
+                    }
+                    self.render();
+                }
+                crate::platform::Key::Enter => self.commit_stepper_edit(),
+                crate::platform::Key::Escape => {
+                    self.stepper_edit = None;
+                    self.render();
+                }
+                _ => {}
+            }
+            return;
+        }
         if !self.tag_focus {
             return;
         }
@@ -463,6 +562,36 @@ impl SettingsWindow {
             }
             _ => {}
         }
+    }
+
+    /// 热键录制: 收到按键组合时保存并通知重新注册喵
+    fn on_hotkey_chord(&mut self, modifiers: String, key: String) {
+        if !self.hotkey_capture {
+            return;
+        }
+        // Esc 取消录制喵
+        if key == "esc" {
+            self.hotkey_capture = false;
+            log::debug!("热键录制已取消喵");
+            self.render();
+            return;
+        }
+        // 只接受带修饰键的组合,防止误设单键热键抢占输入喵
+        if modifiers.is_empty() {
+            log::debug!("热键需包含修饰键,忽略 {key} 喵");
+            return;
+        }
+        {
+            let mut state = self.state.borrow_mut();
+            state.config.hotkey.enabled = true;
+            state.config.hotkey.modifiers = modifiers.clone();
+            state.config.hotkey.key = key.clone();
+            state.persist();
+        }
+        self.hotkey_capture = false;
+        self.commands.borrow_mut().push_back(Command::ReapplyHotkey);
+        log::info!("全局热键已更新: {} + {} 喵", modifiers, key);
+        self.render();
     }
 
     fn drop_files(&mut self, paths: Vec<String>) {
@@ -505,6 +634,7 @@ impl WindowHandler for SettingsWindow {
             WindowEvent::MouseDown(x, y) => self.handle_click(x, y),
             WindowEvent::Char(ch) => self.on_char(ch),
             WindowEvent::KeyDown(key) => self.on_key(key),
+            WindowEvent::HotkeyChord { modifiers, key } => self.on_hotkey_chord(modifiers, key),
             WindowEvent::ImePreedit(_) => {}
             WindowEvent::FilesDropped(paths) => self.drop_files(paths),
             WindowEvent::MouseMove(_, _) | WindowEvent::MouseUp => {}
@@ -530,9 +660,19 @@ impl WindowHandler for SettingsWindow {
     }
 }
 
-/// 步进值并钳制范围,返回是否变化喵
-fn step_value(value: &mut f32, delta: i32, min: f32, max: f32) -> bool {
-    let new_value = (*value + delta as f32).clamp(min, max);
+/// 写入整数值到 f64 字段,返回是否变化喵
+fn set_f64(value: &mut f64, v: i32) -> bool {
+    let new_value = v as f64;
+    if (new_value - *value).abs() < f64::EPSILON {
+        return false;
+    }
+    *value = new_value;
+    true
+}
+
+/// 写入整数值到 f32 字段,返回是否变化喵
+fn set_f32(value: &mut f32, v: i32) -> bool {
+    let new_value = v as f32;
     if (new_value - *value).abs() < f32::EPSILON {
         return false;
     }
@@ -540,8 +680,9 @@ fn step_value(value: &mut f32, delta: i32, min: f32, max: f32) -> bool {
     true
 }
 
-fn step_f64(value: &mut f64, delta: i32, min: f32, max: f32) -> bool {
-    let new_value = (*value + delta as f64).clamp(min as f64, max as f64);
+/// 写入整数值(百分数形式)到比率字段,返回是否变化喵
+fn set_ratio(value: &mut f64, v: i32) -> bool {
+    let new_value = v as f64 / 100.0;
     if (new_value - *value).abs() < f64::EPSILON {
         return false;
     }
@@ -572,13 +713,16 @@ fn sw(id: RowId, label: &str, value: bool) -> SettingsRow {
     }
 }
 
-fn st(id: RowId, label: &str, value: i32, min: i32, max: i32) -> SettingsRow {
+/// 数值步进行: step = 每次点击调整幅度,unit = 单位喵
+fn st(id: RowId, label: &str, value: i32, min: i32, max: i32, step: i32, unit: &str) -> SettingsRow {
     SettingsRow::Stepper {
         id,
         label: label.into(),
         value,
         min,
         max,
+        step,
+        unit: unit.into(),
     }
 }
 
@@ -592,6 +736,7 @@ fn build_pages(
     apps: &[crate::apps::AppInfo],
     selected: Option<&str>,
     tag_draft: &str,
+    hotkey_capture: bool,
 ) -> Vec<SettingsPage> {
     let mut app_rows: Vec<SettingsRow> = vec![
         btn(RowId::Rescan, "重新扫描应用".into()),
@@ -634,23 +779,28 @@ fn build_pages(
         let tune: DurationBounce = island.springs.get(t);
         spring_rows.push(st(
             RowId::SpringDuration(i),
-            &format!("{} 时长 ms", spring_label(i)),
+            &format!("{} 时长", spring_label(i)),
             (tune.duration * 100.0).round() as i32,
             5,
             200,
+            10,
+            "ms",
         ));
         spring_rows.push(st(
             RowId::SpringBounce(i),
-            &format!("{} 弹性 %", spring_label(i)),
+            &format!("{} 弹性", spring_label(i)),
             (tune.bounce * 100.0).round() as i32,
             0,
             95,
+            5,
+            "%",
         ));
     }
 
     vec![
         SettingsPage {
             title: "巢穴".into(),
+            subtitle: "外观 · 浮窗与热键 · 列表显示喵".into(),
             groups: vec![
                 SettingsGroup {
                     title: "外观".into(),
@@ -670,10 +820,19 @@ fn build_pages(
                     title: "热键".into(),
                     rows: vec![
                         sw(RowId::HotkeyEnabled, "启用全局热键", config.hotkey.enabled),
-                        SettingsRow::Label {
-                            label: "热键组合".into(),
-                            value: format!("{}+{}", config.hotkey.modifiers, config.hotkey.key),
-                        },
+                        btn(
+                            RowId::HotkeyRecord,
+                            if hotkey_capture {
+                                "按下新组合键··· (Esc 取消)".into()
+                            } else if config.hotkey.modifiers.is_empty() {
+                                format!("重新录制热键 · {}", config.hotkey.key)
+                            } else {
+                                format!(
+                                    "重新录制热键 · {}+{}",
+                                    config.hotkey.modifiers, config.hotkey.key
+                                )
+                            },
+                        ),
                     ],
                 },
                 SettingsGroup {
@@ -690,6 +849,8 @@ fn build_pages(
                             config.window.icon_size as i32,
                             24,
                             64,
+                            2,
+                            "px",
                         ),
                         btn(
                             RowId::SearchMode,
@@ -708,20 +869,23 @@ fn build_pages(
         },
         SettingsPage {
             title: "灵动岛".into(),
+            subtitle: "胶囊几何 · 锚点 · 动效策略喵".into(),
             groups: vec![
                 SettingsGroup {
                     title: "几何".into(),
                     rows: vec![
-                        st(RowId::IslandW, "胶囊宽", island.width as i32, 160, 640),
-                        st(RowId::IslandH, "胶囊高", island.height as i32, 32, 80),
-                        st(RowId::IslandX, "水平锚点 %", island.x as i32, 2, 98),
-                        st(RowId::IslandY, "垂直锚点 %", island.y as i32, 2, 98),
+                        st(RowId::IslandW, "胶囊宽", island.width as i32, 160, 640, 4, "px"),
+                        st(RowId::IslandH, "胶囊高", island.height as i32, 32, 80, 2, "px"),
+                        st(RowId::IslandX, "水平锚点", island.x as i32, 2, 98, 1, "%"),
+                        st(RowId::IslandY, "垂直锚点", island.y as i32, 2, 98, 1, "%"),
                         st(
                             RowId::ExpandedW,
                             "展开宽",
                             island.expanded_width as i32,
                             280,
                             900,
+                            10,
+                            "px",
                         ),
                         st(
                             RowId::ExpandedH,
@@ -729,6 +893,8 @@ fn build_pages(
                             island.expanded_height as i32,
                             160,
                             720,
+                            8,
+                            "px",
                         ),
                         st(
                             RowId::ExpandedR,
@@ -736,21 +902,27 @@ fn build_pages(
                             island.expanded_radius as i32,
                             8,
                             48,
+                            2,
+                            "px",
                         ),
                         st(
                             RowId::InputRatio,
-                            "输入槽占比 %",
-                            (island.input_ratio * 100.0) as i32,
+                            "输入槽占比",
+                            (island.input_ratio * 100.0).round() as i32,
                             20,
                             100,
+                            1,
+                            "%",
                         ),
-                        st(RowId::Margin, "安全边距", island.margin as i32, 0, 80),
+                        st(RowId::Margin, "安全边距", island.margin as i32, 0, 80, 2, "px"),
                         st(
                             RowId::Squash,
-                            "收起压扁 %",
-                            (island.summon_squash * 100.0) as i32,
+                            "收起压扁",
+                            (island.summon_squash * 100.0).round() as i32,
                             5,
                             100,
+                            1,
+                            "%",
                         ),
                     ],
                 },
@@ -774,13 +946,17 @@ fn build_pages(
         },
         SettingsPage {
             title: "弹簧".into(),
-            groups: vec![SettingsGroup {
-                title: "六段过渡 (时长×10ms / 弹性%)".into(),
-                rows: spring_rows,
-            }],
+            subtitle: "六段过渡的时长与弹性手感喵".into(),
+            groups: vec![
+                SettingsGroup {
+                    title: "过渡参数".into(),
+                    rows: spring_rows,
+                },
+            ],
         },
         SettingsPage {
             title: "应用".into(),
+            subtitle: "注册管理 · 标签整理喵".into(),
             groups: vec![
                 SettingsGroup {
                     title: "注册".into(),
@@ -794,6 +970,7 @@ fn build_pages(
         },
         SettingsPage {
             title: "关于".into(),
+            subtitle: "版本与内核信息喵".into(),
             groups: vec![SettingsGroup {
                 title: "关于".into(),
                 rows: vec![
@@ -805,10 +982,10 @@ fn build_pages(
                         label: "项目".into(),
                         value: "meow-app-launcher".into(),
                     },
-        SettingsRow::Label {
-            label: "岛内核".into(),
-            value: "spring + FSM + 边界回弹".into(),
-        },
+                    SettingsRow::Label {
+                        label: "岛内核".into(),
+                        value: "spring + FSM + 边界回弹".into(),
+                    },
                 ],
             }],
         },

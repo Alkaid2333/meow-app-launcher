@@ -25,7 +25,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// 动画帧间隔(ms)喵
+/// 动画帧间隔基准(ms)喵(实际按显示器刷新率对齐)喵
 const ANIM_INTERVAL_MS: u32 = 16;
 /// 光标闪烁间隔(ms)喵
 const CARET_INTERVAL_MS: u32 = 500;
@@ -90,6 +90,10 @@ pub struct Launcher {
     drag: Option<DragState>,
     /// 刚拖完,吞掉下一次 click 喵
     just_dragged: bool,
+    /// 当前生效的定时器间隔(ms,仅变化时重设,避免每帧重置导致抖动)喵
+    timer_interval_ms: u32,
+    /// 上次设置窗口位置喵(未变时跳过 SetWindowPos,省同步开销)喵
+    last_win_pos: Option<(i32, i32)>,
 }
 
 /// 拖拽快照喵
@@ -174,6 +178,8 @@ impl Launcher {
             ime_preedit: String::new(),
             drag: None,
             just_dragged: false,
+            timer_interval_ms: HEARTBEAT_MS,
+            last_win_pos: None,
         };
 
         // 首次启动后台异步扫描系统应用喵(不阻塞窗口创建)喵
@@ -184,7 +190,7 @@ impl Launcher {
 
         // 绑定事件处理器喵
         platform.set_window_handler(&window, Box::new(launcher));
-        // 常驻心跳: 隐藏时也要排空托盘命令喵
+        // 常驻心跳: 隐藏时也要排空托盘命令喵(字段初始值已对齐到此间隔)喵
         platform.set_timer(&window, HEARTBEAT_MS);
 
         window
@@ -451,6 +457,22 @@ impl Launcher {
                 Command::OpenSettings => self.open_settings(),
                 Command::Rescan => self.spawn_scan(),
                 Command::Restart => self.restart(),
+                Command::ReapplyHotkey => {
+                    self.platform.unregister_global_hotkey();
+                    let hotkey = self.state.borrow().config.hotkey.clone();
+                    if hotkey.enabled {
+                        let ok = self
+                            .platform
+                            .register_global_hotkey(&hotkey.modifiers, &hotkey.key, self.window);
+                        log::info!(
+                            "全局热键已重注册: {}+{} 成功={ok} 喵",
+                            hotkey.modifiers,
+                            hotkey.key
+                        );
+                    } else {
+                        log::info!("全局热键已禁用喵");
+                    }
+                }
                 Command::Quit => self.quit(),
             }
         }
@@ -522,7 +544,24 @@ impl Launcher {
     /// 启动动画帧定时器喵
     fn start_animation(&mut self) {
         self.last_tick = None;
-        self.platform.set_timer(&self.window, ANIM_INTERVAL_MS);
+        self.set_timer_interval(self.anim_interval());
+    }
+
+    /// 动画帧间隔: 与显示器刷新率对齐,高刷屏不掉帧喵
+    fn anim_interval(&self) -> u32 {
+        let refresh = self.platform.display_refresh_rate().max(30);
+        (1000 / refresh).clamp(6, ANIM_INTERVAL_MS + 4)
+    }
+
+    /// 设置定时器间隔,仅在实际变化时才重设喵
+    ///
+    /// 每次重置会让 WM_TIMER 相位归零,若每帧都重设,实际周期会拖成
+    /// 「间隔 + 渲染耗时」,节奏忽快忽慢喵。因此只在切换档位时重设喵。
+    fn set_timer_interval(&mut self, ms: u32) {
+        if self.timer_interval_ms != ms {
+            self.timer_interval_ms = ms;
+            self.platform.set_timer(&self.window, ms);
+        }
     }
 
     /// 动画帧推进喵
@@ -538,7 +577,7 @@ impl Launcher {
         let hidden_done = !self.visible && self.island.settled();
         if hidden_done {
             self.platform.show_window(&self.window, false);
-            self.platform.set_timer(&self.window, HEARTBEAT_MS);
+            self.set_timer_interval(HEARTBEAT_MS);
             return;
         }
 
@@ -564,14 +603,14 @@ impl Launcher {
 
         let interval = if animating || self.visible {
             if animating {
-                ANIM_INTERVAL_MS
+                self.anim_interval()
             } else {
                 CARET_INTERVAL_MS
             }
         } else {
             HEARTBEAT_MS
         };
-        self.platform.set_timer(&self.window, interval);
+        self.set_timer_interval(interval);
     }
 
     fn want_expanded(&self) -> bool {
@@ -631,7 +670,12 @@ impl Launcher {
         }
         let win_x = (frame.left as f32 * scale - layout::SHADOW_MARGIN * scale).round() as i32;
         let win_y = (frame.top as f32 * scale - layout::SHADOW_MARGIN * scale).round() as i32;
-        self.platform.move_window(&self.window, win_x, win_y);
+        // 位置未变时跳过 SetWindowPos,避免每帧向 DWM 发起同步重排(拖累帧率)喵
+        let pos = (win_x, win_y);
+        if self.last_win_pos != Some(pos) {
+            self.last_win_pos = Some(pos);
+            self.platform.move_window(&self.window, win_x, win_y);
+        }
 
         let theme = {
             let state = self.state.borrow();
@@ -680,6 +724,7 @@ impl WindowHandler for Launcher {
                 }
             }
             WindowEvent::Timer => self.tick(),
+            WindowEvent::HotkeyChord { .. } => {}
             WindowEvent::Close => {}
             WindowEvent::FilesDropped(_) => {}
         }

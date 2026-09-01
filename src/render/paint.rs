@@ -25,8 +25,14 @@ pub fn paint_scene(
     if layout.opacity <= 0.001 {
         return;
     }
-    let count = canvas.save();
-    canvas.save_layer_alpha_f(None, layout.opacity);
+    // 透明度接近 1 时不再开离屏图层,省掉整帧合成开销(动画更顺畅)喵
+    let count = if layout.opacity < 0.999 {
+        let c = canvas.save();
+        canvas.save_layer_alpha_f(None, layout.opacity);
+        c
+    } else {
+        canvas.save()
+    };
 
     draw_island(canvas, theme, layout);
     draw_search_content(canvas, theme, layout, state, fonts, caret_on, ime_preedit);
@@ -45,22 +51,26 @@ fn draw_island(canvas: &Canvas, theme: &Theme, layout: &Layout) {
     let radius = layout.radius.min(rect.height() / 2.0).max(0.0);
     let path = shape::rounded_rect_path(rect, radius);
 
-    draw_shadow(canvas, &path, theme.shadow, 16.0, 5.0);
+    // 阴影按岛体高度淡化为「轻微落地感」;扩展面板大时进一步减弱,
+    // 避免整圈辉光包围扩展窗喵
+    let base = theme.shadow;
+    let factor = if rect.height() > 90.0 { 0.35 } else { 0.7 };
+    let shadow = Color::from_argb(
+        (base.a() as f32 * factor).round().clamp(0.0, 255.0) as u8,
+        base.r(),
+        base.g(),
+        base.b(),
+    );
+    draw_shadow(canvas, &path, rect, shadow, 9.0, 5.0);
 
     let mut fill = Paint::default();
     fill.set_color(theme.fill);
     fill.set_anti_alias(true);
     canvas.draw_path(&path, &fill);
 
-    match theme.visual {
-        IslandVisual::Glass => {
-            draw_noise(canvas, rect, 5, 26);
-            draw_sheen(canvas, rect, theme.highlight);
-        }
-        IslandVisual::Ink => {
-            draw_sheen(canvas, rect, theme.highlight);
-        }
-        IslandVisual::Outline => {}
+    // 玻璃材质加细噪点;顶部高光横线已移除,避免透明主题下突兀的亮线喵
+    if theme.visual == IslandVisual::Glass {
+        draw_noise(canvas, rect, 5, 26);
     }
 
     let mut stroke = Paint::default();
@@ -74,17 +84,9 @@ fn draw_island(canvas: &Canvas, theme: &Theme, layout: &Layout) {
     stroke.set_stroke_width(if theme.visual == IslandVisual::Outline {
         1.5
     } else {
-        1.0
+        1.25
     });
     canvas.draw_path(&path, &stroke);
-}
-
-fn draw_sheen(canvas: &Canvas, rect: Rect, color: Color) {
-    let hi = Rect::from_xywh(rect.left + 8.0, rect.top + 1.0, rect.width() - 16.0, 1.5);
-    let mut hp = Paint::default();
-    hp.set_color(color);
-    hp.set_anti_alias(true);
-    canvas.draw_rect(hi, &hp);
 }
 
 fn draw_noise(canvas: &Canvas, rect: Rect, density: usize, alpha: u8) {
@@ -350,8 +352,20 @@ fn draw_fallback_icon(canvas: &Canvas, theme: &Theme, rect: Rect, name: &str, fo
     text::draw_centered(canvas, &label, rect, &font, &p);
 }
 
-fn draw_shadow(canvas: &Canvas, path: &skia_safe::Path, color: Color, blur: f32, dy: f32) {
+/// 画岛下投影喵: 裁掉顶部上方的光斑,避免「重影」错觉喵
+///
+/// 旧实现把整条模糊路径沿 +y 移 5px,其上半圈光晕会盖在岛顶上方,
+/// 动画时看起来像岛上方有一团暗色重影喵。这里把投影裁剪到岛体下方,
+/// 保留底部与侧边的柔和辉光,顶部以上一律不画喵。
+fn draw_shadow(canvas: &Canvas, path: &skia_safe::Path, rect: Rect, color: Color, blur: f32, dy: f32) {
     canvas.save();
+    let clip = Rect::from_xywh(
+        rect.left - blur,
+        rect.top,
+        rect.width() + blur * 2.0,
+        rect.height() + blur + dy,
+    );
+    canvas.clip_rect(clip, None, Some(false));
     canvas.translate((0.0, dy));
     let mut p = Paint::default();
     p.set_color(color);
@@ -361,7 +375,10 @@ fn draw_shadow(canvas: &Canvas, path: &skia_safe::Path, color: Color, blur: f32,
     canvas.restore();
 }
 
+/// 绘制搜索图标喵(圆心对齐整数像素,细环描边更锐利)喵
 fn draw_search_icon(canvas: &Canvas, cx: f32, cy: f32, size: f32, color: Color) {
+    let cx = cx.round();
+    let cy = cy.round();
     let mut paint = Paint::default();
     paint.set_color(color);
     paint.set_anti_alias(true);
