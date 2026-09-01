@@ -289,8 +289,19 @@ impl Launcher {
                 self.state.borrow_mut().query.pop();
                 self.refresh_results();
             }
-            Key::Up => self.nudge_selection(-1),
-            Key::Down => self.nudge_selection(1),
+            Key::Up => self.nudge_vertical(-1),
+            Key::Down => self.nudge_vertical(1),
+            // 网格排版: 左右键切换列喵
+            Key::Left => {
+                if self.grid_mode() {
+                    self.nudge_selection(-1);
+                }
+            }
+            Key::Right => {
+                if self.grid_mode() {
+                    self.nudge_selection(1);
+                }
+            }
             _ => {}
         }
     }
@@ -427,6 +438,22 @@ impl Launcher {
         self.ensure_selected_visible();
         log::debug!("选中: {} 喵", self.state.borrow().selected);
         self.request_render();
+    }
+
+    /// 是否网格排版喵
+    fn grid_mode(&self) -> bool {
+        self.state.borrow().config.window.layout == crate::app::config::AppLayout::Grid
+    }
+
+    /// 纵向导航: 网格按「每行列数」为步长(上下换行),列表步长为 1 喵
+    fn nudge_vertical(&mut self, dir: isize) {
+        let step: isize = if self.grid_mode() {
+            let frame = self.island.frame();
+            crate::render::layout::grid_cols(frame.panel.w as f32).max(1) as isize
+        } else {
+            1
+        };
+        self.nudge_selection(dir * step);
     }
 
     /// 保证选中项在结果面板可视区内,必要时滚动喵

@@ -134,6 +134,8 @@ pub enum RowHit {
     Chip(usize),
     /// 输入行喵
     Input(RowId),
+    /// 恢复该项默认值喵
+    Restore(RowId),
 }
 
 /// 配置行身份喵(热更新时不靠页面下标)喵
@@ -190,7 +192,8 @@ pub struct SettingsLayout {
 
 /// 绘制配置窗口喵,返回布局结果喵
 ///
-/// `edit` 为正在手动键入的数值行(id + 草稿);`recording` 为热键录制中喵。
+/// `edit` 为正在键入的数值行(id + 草稿 + 是否全选态);
+/// `recording` 为热键录制中;`dirty` 为偏离默认值的行(行首画恢复图标)喵。
 /// `width`/`height` 为窗口当前逻辑尺寸(支持拖拽缩放)喵。
 #[allow(clippy::too_many_arguments)]
 pub fn paint_settings(
@@ -200,8 +203,9 @@ pub fn paint_settings(
     pages: &[SettingsPage],
     current_page: usize,
     scroll: f32,
-    edit: Option<&(RowId, String)>,
+    edit: Option<&(RowId, String, bool)>,
     recording: bool,
+    dirty: &[RowId],
     width: f32,
     height: f32,
 ) -> SettingsLayout {
@@ -236,7 +240,7 @@ pub fn paint_settings(
 
     // 内容区(页头 + 可滚动分组)喵
     let content_height =
-        paint_content(canvas, theme, fonts, pages, current_page, scroll, edit, recording, width, height, &mut hits);
+        paint_content(canvas, theme, fonts, pages, current_page, scroll, edit, recording, dirty, width, height, &mut hits);
 
     // 右上角关闭钮喵
     paint_close_button(canvas, theme, fonts, width, &mut hits);
@@ -430,8 +434,9 @@ fn paint_content(
     pages: &[SettingsPage],
     current_page: usize,
     scroll: f32,
-    edit: Option<&(RowId, String)>,
+    edit: Option<&(RowId, String, bool)>,
     recording: bool,
+    dirty: &[RowId],
     width: f32,
     height: f32,
     hits: &mut Vec<(Rect, RowHit)>,
@@ -528,7 +533,7 @@ fn paint_content(
                 group_rect.width() - GROUP_PADDING * 2.0,
                 ROW_HEIGHT,
             );
-            paint_row(canvas, theme, fonts, row, row_rect, scroll, edit, recording, hits, &mut pick_i, &mut chip_i);
+            paint_row(canvas, theme, fonts, row, row_rect, scroll, edit, recording, dirty, hits, &mut pick_i, &mut chip_i);
             row_y += ROW_HEIGHT;
         }
 
@@ -542,6 +547,7 @@ fn paint_content(
 }
 
 /// 绘制单行控件喵
+#[allow(clippy::too_many_arguments)]
 fn paint_row(
     canvas: &Canvas,
     theme: &SettingsTheme,
@@ -549,15 +555,34 @@ fn paint_row(
     row: &SettingsRow,
     rect: Rect,
     scroll: f32,
-    edit: Option<&(RowId, String)>,
+    edit: Option<&(RowId, String, bool)>,
     recording: bool,
+    dirty: &[RowId],
     hits: &mut Vec<(Rect, RowHit)>,
     pick_i: &mut usize,
     chip_i: &mut usize,
 ) {
+    // 可调行: 偏离默认值时在行首画「恢复默认」图标喵
+    let rid = match row {
+        SettingsRow::Switch { id, .. }
+        | SettingsRow::Stepper { id, .. }
+        | SettingsRow::Button { id, .. } => Some(*id),
+        _ => None,
+    };
+    let label_off = if let Some(r) = rid
+        && dirty.contains(&r)
+    {
+        let icon = Rect::from_xywh(rect.left, rect.center_y() - 9.0, 18.0, 18.0);
+        draw_restore_icon(canvas, theme, fonts, icon);
+        hits.push((screen_hit(icon, scroll), RowHit::Restore(r)));
+        22.0
+    } else {
+        0.0
+    };
+
     match row {
         SettingsRow::Switch { id, label, value } => {
-            draw_row_label(canvas, theme, fonts, label, rect, 96.0);
+            draw_row_label(canvas, theme, fonts, label, rect, 96.0, label_off);
             draw_chip(canvas, fonts, rect.right - 84.0, rect, "开关", theme.moss);
             draw_toggle(canvas, theme, rect, *value);
             hits.push((screen_hit(rect, scroll), RowHit::Switch(*id)));
@@ -571,7 +596,7 @@ fn paint_row(
             step,
             unit,
         } => {
-            draw_row_label(canvas, theme, fonts, label, rect, 236.0);
+            draw_row_label(canvas, theme, fonts, label, rect, 236.0, label_off);
             // 调整类型徽章喵
             draw_chip(canvas, fonts, rect.right - 222.0, rect, "数字", theme.accent);
 
@@ -595,9 +620,10 @@ fn paint_row(
 
             // 数值框(可点击进入手动键入)喵
             let box_rect = Rect::from_xywh(rect.right - 112.0, rect.center_y() - 14.0, 64.0, 28.0);
-            let editing = matches!(edit, Some((eid, _)) if *eid == *id);
+            let editing = matches!(edit, Some((eid, _, _)) if *eid == *id);
             let draft: Option<&str> = if editing { edit.map(|e| e.1.as_str()) } else { None };
-            draw_value_box(canvas, theme, fonts, box_rect, *value, unit, editing, draft);
+            let sel_all = matches!(edit, Some((eid, _, true)) if *eid == *id);
+            draw_value_box(canvas, theme, fonts, box_rect, *value, unit, editing, sel_all, draft);
             hits.push((screen_hit(box_rect, scroll), RowHit::StepperEdit(*id)));
 
             // 步进加号喵
@@ -608,7 +634,7 @@ fn paint_row(
             let _ = (min, max);
         }
         SettingsRow::Label { label, value } => {
-            draw_row_label(canvas, theme, fonts, label, rect, 240.0);
+            draw_row_label(canvas, theme, fonts, label, rect, 240.0, 0.0);
             let value_font = fonts.font(12.5);
             let mut vp = Paint::default();
             vp.set_color(theme.disabled);
@@ -705,7 +731,7 @@ fn paint_row(
             *chip_i += 1;
         }
         SettingsRow::Input { id, label, value } => {
-            draw_row_label(canvas, theme, fonts, label, rect, 240.0);
+            draw_row_label(canvas, theme, fonts, label, rect, 240.0, 0.0);
             let box_rect = Rect::from_xywh(rect.right - 220.0, rect.center_y() - 14.0, 220.0, 28.0);
             let path = shape::rounded_rect_path(box_rect, CTRL_RADIUS);
             let mut bg = Paint::default();
@@ -728,7 +754,8 @@ fn paint_row(
     }
 }
 
-/// 绘制数值框喵: 静态时显示「值+单位」,编辑中显示草稿 + 光标喵
+/// 绘制数值框喵: 静态时显示「值+单位」;编辑中显示草稿 + 光标;
+/// `sel_all` 为全选态(强调色底,键入即整体替换)喵
 #[allow(clippy::too_many_arguments)]
 fn draw_value_box(
     canvas: &Canvas,
@@ -738,11 +765,16 @@ fn draw_value_box(
     value: i32,
     unit: &str,
     editing: bool,
+    sel_all: bool,
     draft: Option<&str>,
 ) {
     let path = shape::rounded_rect_path(rect, CTRL_RADIUS);
     let mut bg = Paint::default();
-    bg.set_color(theme.control_bg);
+    bg.set_color(if sel_all {
+        Color::from_argb(0x2E, theme.accent.r(), theme.accent.g(), theme.accent.b())
+    } else {
+        theme.control_bg
+    });
     bg.set_anti_alias(true);
     canvas.draw_path(&path, &bg);
 
@@ -811,6 +843,8 @@ fn screen_hit(rect: Rect, scroll: f32) -> Rect {
     Rect::from_xywh(rect.left, rect.top - scroll, rect.width(), rect.height())
 }
 
+/// 行内标签喵: `x_offset` 为行首恢复图标预留的缩进喵
+#[allow(clippy::too_many_arguments)]
 fn draw_row_label(
     canvas: &Canvas,
     theme: &SettingsTheme,
@@ -818,13 +852,38 @@ fn draw_row_label(
     label: &str,
     rect: Rect,
     right_reserve: f32,
+    x_offset: f32,
 ) {
     let font = fonts.font(13.0);
     let mut p = Paint::default();
     p.set_color(theme.text);
     p.set_anti_alias(true);
-    let label_rect = Rect::from_xywh(rect.left, rect.top, (rect.width() - right_reserve).max(40.0), rect.height());
+    let label_rect = Rect::from_xywh(
+        rect.left + x_offset,
+        rect.top,
+        (rect.width() - x_offset - right_reserve).max(40.0),
+        rect.height(),
+    );
     crate::render::text::draw_clipped(canvas, label, label_rect, &font, &p);
+}
+
+/// 绘制「恢复默认」图标喵: 小圆角底 + ↺ 符号喵
+fn draw_restore_icon(canvas: &Canvas, theme: &SettingsTheme, fonts: &FontCache, rect: Rect) {
+    let path = shape::rounded_rect_path(rect, 6.0);
+    let mut bg = Paint::default();
+    bg.set_color(theme.control_bg);
+    bg.set_anti_alias(true);
+    canvas.draw_path(&path, &bg);
+    let mut border = Paint::default();
+    border.set_color(theme.control_border);
+    border.set_anti_alias(true);
+    border.set_style(PaintStyle::Stroke);
+    border.set_stroke_width(1.0);
+    canvas.draw_path(&path, &border);
+    let mut p = Paint::default();
+    p.set_color(theme.accent);
+    p.set_anti_alias(true);
+    crate::render::text::draw_centered(canvas, "↺", rect, &fonts.font(11.0), &p);
 }
 
 /// 绘制开关喵

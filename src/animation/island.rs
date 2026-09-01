@@ -142,7 +142,15 @@ impl EasingName {
     }
 
     pub fn label(self) -> &'static str {
-        self.as_str()
+        match self {
+            Self::Linear => "线性",
+            Self::EaseOutQuad => "二次缓出",
+            Self::EaseOutQuart => "四次缓出",
+            Self::EaseOutQuint => "五次缓出",
+            Self::EaseOutExpo => "指数缓出",
+            Self::EaseInOutCubic => "三次缓入缓出",
+            Self::EaseOutBack => "回弹缓出",
+        }
     }
 
     pub fn cycle(self) -> Self {
