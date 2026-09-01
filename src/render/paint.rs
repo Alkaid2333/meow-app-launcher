@@ -201,6 +201,7 @@ fn draw_items(
     canvas.clip_rect(layout.panel_rect, None, Some(false));
 
     let selected = state.selected;
+    let grid = state.config.window.layout == crate::app::config::AppLayout::Grid;
     for (i, item_rect) in layout.item_rects.iter().enumerate() {
         if item_rect.bottom < layout.panel_rect.top || item_rect.top > layout.panel_rect.bottom {
             continue;
@@ -218,6 +219,7 @@ fn draw_items(
                     i == selected,
                     layout,
                     fonts,
+                    grid,
                 );
             }
             None => {}
@@ -247,7 +249,8 @@ fn draw_scrollbar(canvas: &Canvas, theme: &Theme, track_rect: Rect, thumb_rect: 
 }
 
 fn draw_section(canvas: &Canvas, theme: &Theme, rect: &Rect, title: &str, fonts: &FontCache) {
-    let font = fonts.font(rect.height() * 0.32);
+    // 网格分组的行高更矮,字号保底 10px 保证可读喵
+    let font = fonts.font((rect.height() * 0.32).max(10.0));
     let mut p = Paint::default();
     p.set_color(theme.text_dim);
     p.set_anti_alias(true);
@@ -270,7 +273,13 @@ fn draw_item(
     selected: bool,
     layout: &Layout,
     fonts: &FontCache,
+    grid: bool,
 ) {
+    // 网格排版: 单元格卡片式绘制(图标居中上排 + 名称居中)喵
+    if grid {
+        return draw_grid_item(canvas, theme, rect, app, icon, selected, layout, fonts);
+    }
+
     if selected {
         let bg_path = shape::rounded_rect_path(*rect, 8.0);
         let mut bg = Paint::default();
@@ -339,6 +348,62 @@ fn draw_item(
         &path_font,
         &path_paint,
     );
+}
+
+/// 绘制网格单元格喵: 卡片底 + 居中图标 + 居中名称(隐藏副标题)喵
+#[allow(clippy::too_many_arguments)]
+fn draw_grid_item(
+    canvas: &Canvas,
+    theme: &Theme,
+    rect: &Rect,
+    app: &crate::apps::AppInfo,
+    icon: Option<skia_safe::Image>,
+    selected: bool,
+    layout: &Layout,
+    fonts: &FontCache,
+) {
+    // 选中: 圆角卡片底 + 强调色描边喵
+    let bg_path = shape::rounded_rect_path(*rect, 10.0);
+    if selected {
+        let mut bg = Paint::default();
+        bg.set_color(theme.hover_bg);
+        bg.set_anti_alias(true);
+        canvas.draw_path(&bg_path, &bg);
+        let mut sel = Paint::default();
+        sel.set_color(theme.accent);
+        sel.set_anti_alias(true);
+        sel.set_style(skia_safe::PaintStyle::Stroke);
+        sel.set_stroke_width(1.5);
+        canvas.draw_path(&bg_path, &sel);
+    }
+
+    let icon_size = layout.icon_size.min(rect.height() * 0.42).max(24.0);
+    let icon_rect = Rect::from_xywh(
+        rect.center_x() - icon_size / 2.0,
+        rect.top + rect.height() * 0.16 - icon_size / 2.0,
+        icon_size,
+        icon_size,
+    );
+    match icon {
+        Some(img) => draw_icon(canvas, &img, icon_rect),
+        None => draw_fallback_icon(canvas, theme, icon_rect, &app.name, fonts),
+    }
+
+    // 名称居中(裁剪防溢出)喵
+    let name_font = fonts.font((rect.height() * 0.16).max(10.0));
+    let mut np = Paint::default();
+    np.set_color(theme.text);
+    np.set_anti_alias(true);
+    let name_rect = Rect::from_xywh(
+        rect.left + 4.0,
+        icon_rect.bottom + 3.0,
+        rect.width() - 8.0,
+        rect.bottom - icon_rect.bottom - 3.0,
+    );
+    canvas.save();
+    canvas.clip_rect(name_rect, None, Some(false));
+    text::draw_centered(canvas, &app.name, name_rect, &name_font, &np);
+    canvas.restore();
 }
 
 fn draw_icon(canvas: &Canvas, image: &skia_safe::Image, dst: Rect) {

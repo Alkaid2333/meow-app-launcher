@@ -110,6 +110,10 @@ pub enum SettingsRow {
 pub enum RowHit {
     /// 导航页(索引)喵
     Nav(usize),
+    /// 窗口栏(按住拖动窗口)喵
+    TitleBar,
+    /// 窗口右下角缩放手柄喵
+    ResizeGrip,
     /// 右上角关闭钮喵
     Close,
     /// 开关行喵
@@ -139,6 +143,10 @@ pub enum RowId {
     Theme,
     /// 动画帧率切换喵
     AnimFps,
+    /// 结果排版(网格/列表)切换喵
+    AppLayout,
+    /// 恢复默认设置喵
+    Reset,
     MotionMode,
     Easing,
     AutoMorph,
@@ -183,6 +191,8 @@ pub struct SettingsLayout {
 /// 绘制配置窗口喵,返回布局结果喵
 ///
 /// `edit` 为正在手动键入的数值行(id + 草稿);`recording` 为热键录制中喵。
+/// `width`/`height` 为窗口当前逻辑尺寸(支持拖拽缩放)喵。
+#[allow(clippy::too_many_arguments)]
 pub fn paint_settings(
     canvas: &Canvas,
     theme: &SettingsTheme,
@@ -192,12 +202,14 @@ pub fn paint_settings(
     scroll: f32,
     edit: Option<&(RowId, String)>,
     recording: bool,
+    width: f32,
+    height: f32,
 ) -> SettingsLayout {
     let mut hits = Vec::new();
 
     // 清空背景 + 整体圆角窗口喵
     canvas.clear(Color::TRANSPARENT);
-    let win_rect = Rect::from_xywh(0.0, 0.0, SETTINGS_WIDTH, SETTINGS_HEIGHT);
+    let win_rect = Rect::from_xywh(0.0, 0.0, width, height);
     let win_path = shape::rounded_rect_path(win_rect, WINDOW_RADIUS);
 
     // 窗口阴影(柔和的底部投影)喵
@@ -220,13 +232,17 @@ pub fn paint_settings(
     canvas.clip_path(&win_path, None, Some(false));
 
     // 侧边栏(品牌块 + 导航)喵
-    paint_sidebar(canvas, theme, fonts, pages, current_page, &mut hits);
+    paint_sidebar(canvas, theme, fonts, pages, current_page, height, &mut hits);
 
     // 内容区(页头 + 可滚动分组)喵
-    let content_height = paint_content(canvas, theme, fonts, pages, current_page, scroll, edit, recording, &mut hits);
+    let content_height =
+        paint_content(canvas, theme, fonts, pages, current_page, scroll, edit, recording, width, height, &mut hits);
 
     // 右上角关闭钮喵
-    paint_close_button(canvas, theme, fonts, &mut hits);
+    paint_close_button(canvas, theme, fonts, width, &mut hits);
+
+    // 窗口栏(整条顶部区域可拖动窗口) + 右下角缩放手柄喵
+    paint_window_chrome(canvas, theme, width, height, &mut hits);
 
     canvas.restore();
 
@@ -243,9 +259,10 @@ fn paint_sidebar(
     fonts: &FontCache,
     pages: &[SettingsPage],
     current_page: usize,
+    height: f32,
     hits: &mut Vec<(Rect, RowHit)>,
 ) {
-    let sidebar_rect = Rect::from_xywh(0.0, 0.0, SIDEBAR_WIDTH, SETTINGS_HEIGHT);
+    let sidebar_rect = Rect::from_xywh(0.0, 0.0, SIDEBAR_WIDTH, height);
     let mut bg = Paint::default();
     bg.set_color(theme.sidebar_bg);
     bg.set_anti_alias(true);
@@ -351,9 +368,10 @@ fn paint_close_button(
     canvas: &Canvas,
     theme: &SettingsTheme,
     fonts: &FontCache,
+    width: f32,
     hits: &mut Vec<(Rect, RowHit)>,
 ) {
-    let rect = Rect::from_xywh(SETTINGS_WIDTH - 44.0, 14.0, 28.0, 28.0);
+    let rect = Rect::from_xywh(width - 44.0, 14.0, 28.0, 28.0);
     let path = shape::rounded_rect_path(rect, CTRL_RADIUS);
     // 底 + 描边喵
     let mut bg = Paint::default();
@@ -374,7 +392,37 @@ fn paint_close_button(
     hits.push((rect, RowHit::Close));
 }
 
+/// 绘制窗口栏装饰与命中区喵: 顶部栏可拖动窗口,右下角为缩放手柄喵
+fn paint_window_chrome(
+    canvas: &Canvas,
+    theme: &SettingsTheme,
+    width: f32,
+    height: f32,
+    hits: &mut Vec<(Rect, RowHit)>,
+) {
+    // 窗口栏: 顶部整条(侧边栏上沿 + 内容页头上沿)都可拖拽窗口喵
+    let title_rect = Rect::from_xywh(0.0, 0.0, width, 30.0);
+    hits.push((title_rect, RowHit::TitleBar));
+
+    // 右下角缩放手柄: 三条短斜线提示可拖拽缩放喵
+    let grip = Rect::from_xywh(width - 18.0, height - 18.0, 18.0, 18.0);
+    let mut lp = Paint::default();
+    lp.set_color(theme.disabled);
+    lp.set_anti_alias(true);
+    lp.set_stroke_width(1.5);
+    for i in 0..3 {
+        let off = 4.0 + i as f32 * 4.0;
+        canvas.draw_line(
+            (grip.right - off, grip.bottom - 2.0),
+            (grip.right - 2.0, grip.bottom - off),
+            &lp,
+        );
+    }
+    hits.push((grip, RowHit::ResizeGrip));
+}
+
 /// 绘制内容区(页头 + 分组卡片),返回内容总高度喵
+#[allow(clippy::too_many_arguments)]
 fn paint_content(
     canvas: &Canvas,
     theme: &SettingsTheme,
@@ -384,10 +432,12 @@ fn paint_content(
     scroll: f32,
     edit: Option<&(RowId, String)>,
     recording: bool,
+    width: f32,
+    height: f32,
     hits: &mut Vec<(Rect, RowHit)>,
 ) -> f32 {
     let content_left = SIDEBAR_WIDTH;
-    let content_width = SETTINGS_WIDTH - SIDEBAR_WIDTH;
+    let content_width = width - SIDEBAR_WIDTH;
 
     let Some(page) = pages.get(current_page) else {
         return 0.0;
@@ -409,12 +459,12 @@ fn paint_content(
     hline.set_anti_alias(true);
     canvas.draw_line(
         (content_left + 14.0, HEADER_HEIGHT - 2.0),
-        (SETTINGS_WIDTH - 14.0, HEADER_HEIGHT - 2.0),
+        (width - 14.0, HEADER_HEIGHT - 2.0),
         &hline,
     );
 
     // 内容区裁剪(可滚动)喵
-    let content_rect = Rect::from_xywh(content_left, 0.0, content_width, SETTINGS_HEIGHT);
+    let content_rect = Rect::from_xywh(content_left, 0.0, content_width, height);
     canvas.save();
     canvas.clip_rect(content_rect, None, Some(false));
     canvas.translate((0.0, -scroll));
@@ -578,10 +628,10 @@ fn paint_row(
             canvas.draw_path(&path, &bg);
             let font = fonts.font(13.0);
             let mut p = Paint::default();
-            // 删除类动作用警示色区分;录制中用白字;其余用强调色喵
+            // 删除/重置类动作用警示色区分;录制中用白字;其余用强调色喵
             p.set_color(if rec {
                 Color::WHITE
-            } else if *id == RowId::RemoveApp {
+            } else if *id == RowId::RemoveApp || *id == RowId::Reset {
                 theme.danger
             } else {
                 theme.accent

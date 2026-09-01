@@ -6,7 +6,7 @@
 //! 状态机: 常驻(隐藏) → 收到 `settings_visible` 标志 → 显示并渲染 → 红点关闭喵。
 
 use crate::animation::{DurationBounce, IslandTransition};
-use crate::app::config::{AppConfig, SearchMode};
+use crate::app::config::{AppConfig, AppLayout, SearchMode};
 use crate::app::{Command, SharedState};
 use crate::platform::{Platform, PlatformWindow, WindowEvent, WindowHandler};
 use crate::render::font::FontCache;
@@ -57,10 +57,30 @@ pub struct SettingsWindow {
     tag_draft: String,
     /// 是否正在编辑标签喵
     tag_focus: bool,
-    /// 正在手动键入的数值行(id + 草稿)喵
-    stepper_edit: Option<(RowId, String)>,
+    /// 正在手动键入的数值行(id + 草稿 + 是否未编辑)喵
+    stepper_edit: Option<(RowId, String, bool)>,
     /// 是否正在录制全局热键喵
     hotkey_capture: bool,
+    /// 窗口当前逻辑尺寸(可拖拽缩放)喵
+    win_w: f32,
+    /// 窗口当前逻辑高度喵
+    win_h: f32,
+    /// 窗口屏幕位置(物理像素)喵
+    win_pos: Option<(i32, i32)>,
+    /// 窗口拖拽/缩放状态喵
+    win_drag: Option<WinDrag>,
+}
+
+/// 窗口拖动/缩放快照喵
+struct WinDrag {
+    /// true = 缩放,false = 移动喵
+    resize: bool,
+    /// 拖拽起点(屏幕坐标)喵
+    anchor_screen: (i32, i32),
+    /// 起点窗口位置喵
+    anchor_pos: (i32, i32),
+    /// 起点窗口尺寸(物理)喵
+    anchor_size: (i32, i32),
 }
 
 impl SettingsWindow {
@@ -114,6 +134,10 @@ impl SettingsWindow {
             tag_focus: false,
             stepper_edit: None,
             hotkey_capture: false,
+            win_w: SETTINGS_WIDTH,
+            win_h: SETTINGS_HEIGHT,
+            win_pos: Some((x, y)),
+            win_drag: None,
         };
 
         platform.set_window_handler(&window, Box::new(settings));
@@ -169,6 +193,11 @@ impl SettingsWindow {
         let canvas = self.renderer.canvas();
         canvas.save();
         canvas.scale((self.scale, self.scale));
+        // 三层元组的第三位是「未编辑」标志,渲染层只看 id + 草稿喵
+        let edit_view: Option<(RowId, String)> = self
+            .stepper_edit
+            .as_ref()
+            .map(|(id, draft, _)| (*id, draft.clone()));
         let layout = paint_settings(
             canvas,
             &theme,
@@ -176,8 +205,10 @@ impl SettingsWindow {
             &pages,
             self.current_page,
             self.scroll,
-            self.stepper_edit.as_ref(),
+            edit_view.as_ref(),
             self.hotkey_capture,
+            self.win_w,
+            self.win_h,
         );
         canvas.restore();
         self.layout = Some(layout);
@@ -212,7 +243,57 @@ impl SettingsWindow {
             .map(|(_, h)| *h);
 
         if let Some(hit) = hit {
-            self.apply_hit(hit);
+            match hit {
+                RowHit::TitleBar => {
+                    self.begin_window_drag(x, y, false);
+                    self.render();
+                }
+                RowHit::ResizeGrip => {
+                    self.begin_window_drag(x, y, true);
+                    self.render();
+                }
+                _ => self.apply_hit(hit),
+            }
+        }
+    }
+
+    /// 开始窗口拖拽/缩放喵: 锚定屏幕坐标与窗口位置/尺寸喵
+    fn begin_window_drag(&mut self, x: f32, y: f32, resize: bool) {
+        let (wx, wy) = self.win_pos.unwrap_or((0, 0));
+        let (w, h) = (self.renderer.width(), self.renderer.height());
+        self.win_drag = Some(WinDrag {
+            resize,
+            anchor_screen: (wx + x as i32, wy + y as i32),
+            anchor_pos: (wx, wy),
+            anchor_size: (w, h),
+        });
+        log::debug!("窗口{}开始喵", if resize { "缩放" } else { "拖动" });
+    }
+
+    /// 拖动窗口 / 调整窗口尺寸喵
+    fn on_mouse_move(&mut self, x: f32, y: f32) {
+        let Some(ref d) = self.win_drag else {
+            return;
+        };
+        let (wx, wy) = self.win_pos.unwrap_or((0, 0));
+        let (dx, dy) = (wx + x as i32 - d.anchor_screen.0, wy + y as i32 - d.anchor_screen.1);
+        if d.resize {
+            // 缩放: 钳制最小尺寸,不超出屏幕喵
+            let min_w = (560.0 * self.scale) as i32;
+            let min_h = (500.0 * self.scale) as i32;
+            let (sw, sh) = self.platform.screen_size();
+            let nw = (d.anchor_size.0 + dx).clamp(min_w, sw.max(min_w));
+            let nh = (d.anchor_size.1 + dy).clamp(min_h, sh.max(min_h));
+            self.renderer.resize(nw, nh);
+            self.platform.resize_window(&self.window, nw, nh);
+            self.win_w = nw as f32 / self.scale;
+            self.win_h = nh as f32 / self.scale;
+            self.render();
+        } else {
+            let nx = d.anchor_pos.0 + dx;
+            let ny = d.anchor_pos.1 + dy;
+            self.platform.move_window(&self.window, nx, ny);
+            self.win_pos = Some((nx, ny));
         }
     }
 
@@ -235,14 +316,16 @@ impl SettingsWindow {
             RowHit::FavStar(i) => self.toggle_fav(i),
             RowHit::Chip(i) => self.remove_chip(i),
             RowHit::Input(_) => self.tag_focus = true,
+            // 窗口栏/手柄在 handle_click 里先行拦截,这里仅收尾喵
+            RowHit::TitleBar | RowHit::ResizeGrip => {}
         }
         self.render();
     }
 
-    /// 进入数值手动键入喵: 以当前值作为草稿起点喵
+    /// 进入数值手动键入喵: 以当前值作为草稿起点(键入即覆盖,免去先删旧值)喵
     fn begin_stepper_edit(&mut self, id: RowId) {
         let cur = self.stepper_value(id);
-        self.stepper_edit = Some((id, cur.to_string()));
+        self.stepper_edit = Some((id, cur.to_string(), true));
         log::debug!("数值键入开始: {id:?} 起点={cur} 喵");
     }
 
@@ -291,7 +374,7 @@ impl SettingsWindow {
     /// 步进调节喵: 按行配置的步幅增减喵
     fn adjust_stepper(&mut self, id: RowId, dir: i32) {
         // 若正在手动键入同一行,先退出键入态,避免草稿与最新值错位喵
-        if self.stepper_edit.as_ref().is_some_and(|(eid, _)| *eid == id) {
+        if self.stepper_edit.as_ref().is_some_and(|(eid, _, _)| *eid == id) {
             self.stepper_edit = None;
         }
         let Some((_, _, step)) = self.stepper_meta(id) else {
@@ -303,7 +386,7 @@ impl SettingsWindow {
 
     /// 手动键入提交: 解析草稿 → 钳制 → 写配置喵
     fn commit_stepper_edit(&mut self) {
-        let Some((id, draft)) = self.stepper_edit.take() else {
+        let Some((id, draft, _)) = self.stepper_edit.take() else {
             return;
         };
         match draft.trim().parse::<i32>() {
@@ -404,6 +487,31 @@ impl SettingsWindow {
                     fps_label(state.config.island.anim_fps)
                 );
             }
+            RowId::AppLayout => {
+                let mut state = self.state.borrow_mut();
+                state.config.window.layout = match state.config.window.layout {
+                    AppLayout::Row => AppLayout::Grid,
+                    AppLayout::Grid => AppLayout::Row,
+                };
+                state.persist();
+                log::info!(
+                    "结果排版 → {} 喵",
+                    app_layout_label(state.config.window.layout)
+                );
+            }
+            RowId::Reset => {
+                let mut state = self.state.borrow_mut();
+                state.config = AppConfig::default();
+                state.persist();
+                log::info!("已恢复默认设置喵~");
+                // 重置后重新注册热键 + 清空各编辑态喵
+                self.commands.borrow_mut().push_back(Command::ReapplyHotkey);
+                self.stepper_edit = None;
+                self.tag_focus = false;
+                self.tag_draft.clear();
+                self.hotkey_capture = false;
+                self.scroll = 0.0;
+            }
             RowId::MotionMode => {
                 let mut state = self.state.borrow_mut();
                 state.config.island.motion_mode = state.config.island.motion_mode.cycle();
@@ -495,10 +603,14 @@ impl SettingsWindow {
     }
 
     fn on_char(&mut self, ch: char) {
-        // 数值键入中: 只收数字与负号喵
+        // 数值键入中: 只收数字与负号;首次输入直接覆盖旧值(选中即替换)喵
         if self.stepper_edit.is_some() {
             if ch.is_ascii_digit() || ch == '-' {
-                if let Some((_, draft)) = self.stepper_edit.as_mut() {
+                if let Some((_, draft, pristine)) = self.stepper_edit.as_mut() {
+                    if *pristine {
+                        draft.clear();
+                        *pristine = false;
+                    }
                     // 只允许开头的负号喵
                     if ch == '-' && !draft.is_empty() {
                         return;
@@ -523,8 +635,9 @@ impl SettingsWindow {
         if self.stepper_edit.is_some() {
             match key {
                 crate::platform::Key::Backspace => {
-                    if let Some((_, draft)) = self.stepper_edit.as_mut() {
+                    if let Some((_, draft, pristine)) = self.stepper_edit.as_mut() {
                         draft.pop();
+                        *pristine = false;
                     }
                     self.render();
                 }
@@ -633,14 +746,15 @@ impl WindowHandler for SettingsWindow {
             WindowEvent::HotkeyChord { modifiers, key } => self.on_hotkey_chord(modifiers, key),
             WindowEvent::ImePreedit(_) => {}
             WindowEvent::FilesDropped(paths) => self.drop_files(paths),
-            WindowEvent::MouseMove(_, _) | WindowEvent::MouseUp => {}
+            WindowEvent::MouseMove(x, y) => self.on_mouse_move(x, y),
+            WindowEvent::MouseUp => self.win_drag = None,
             WindowEvent::MouseWheel(delta) => {
                 if self.visible {
                     // 滚轮滚动内容区,钳制到有效范围喵(每格滚动一行)喵
                     let max_scroll = self
                         .layout
                         .as_ref()
-                        .map(|l| (l.content_height - SETTINGS_HEIGHT).max(0.0))
+                        .map(|l| (l.content_height - self.win_h).max(0.0))
                         .unwrap_or(0.0);
                     self.scroll = (self.scroll - delta / 120.0 * 48.0).clamp(0.0, max_scroll);
                     self.render();
@@ -719,6 +833,14 @@ fn fps_label(v: u32) -> String {
         "自动(屏刷)".into()
     } else {
         format!("{v} Hz")
+    }
+}
+
+/// 排版模式显示名喵
+fn app_layout_label(l: AppLayout) -> &'static str {
+    match l {
+        AppLayout::Grid => "网格",
+        AppLayout::Row => "列表",
     }
 }
 
@@ -873,7 +995,15 @@ fn build_pages(
                                 }
                             ),
                         ),
+                        btn(
+                            RowId::AppLayout,
+                            format!("结果排版 · {}", app_layout_label(config.window.layout)),
+                        ),
                     ],
+                },
+                SettingsGroup {
+                    title: "维护".into(),
+                    rows: vec![btn(RowId::Reset, "恢复默认设置".into())],
                 },
             ],
         },
