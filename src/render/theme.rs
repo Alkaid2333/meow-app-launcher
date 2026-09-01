@@ -30,8 +30,6 @@ pub struct Theme {
     pub backdrop: Backdrop,
     /// 材质填充(含透明度)喵
     pub fill: Color,
-    /// 顶沿高光喵
-    pub highlight: Color,
     /// 岛视觉喵
     pub visual: IslandVisual,
 }
@@ -71,10 +69,9 @@ impl Theme {
             hover_bg: Color::from_argb(0xFF, 0x1A, 0x18, 0x16),
             accent: Color::from_rgb(0xD9, 0x48, 0x1B),
             accent_text: Color::from_rgb(0xFB, 0xE7, 0xDE),
-            shadow: Color::from_argb(0x66, 0x00, 0x00, 0x00),
+            shadow: Color::from_argb(0x3A, 0x00, 0x00, 0x00),
             backdrop: Backdrop::Opaque,
             fill: Color::from_argb(0xFF, 0x0B, 0x0B, 0x0D),
-            highlight: Color::from_argb(0x28, 0xFF, 0xFF, 0xFF),
             visual: IslandVisual::Ink,
         }
     }
@@ -92,7 +89,6 @@ impl Theme {
             shadow: Color::from_argb(0x28, 0x00, 0x00, 0x00),
             backdrop: Backdrop::Acrylic,
             fill: Color::from_argb(0x80, 0x0E, 0x0E, 0x11),
-            highlight: Color::from_argb(0x50, 0xFF, 0xFF, 0xFF),
             visual: IslandVisual::Glass,
         }
     }
@@ -118,7 +114,6 @@ impl Theme {
             shadow: Color::from_argb(0x14, 0x00, 0x00, 0x00),
             backdrop: Backdrop::Opaque,
             fill: Color::from_argb(0xFF, 0xFB, 0xF9, 0xF5),
-            highlight: Color::TRANSPARENT,
             visual: IslandVisual::Outline,
         }
     }
@@ -135,7 +130,6 @@ impl Theme {
             shadow: Color::from_argb(0x40, 0x00, 0x00, 0x00),
             backdrop: Backdrop::Opaque,
             fill: Color::from_argb(0xFF, 0x16, 0x15, 0x0F),
-            highlight: Color::TRANSPARENT,
             visual: IslandVisual::Outline,
         }
     }

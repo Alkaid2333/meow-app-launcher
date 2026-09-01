@@ -225,13 +225,6 @@ impl Platform for Win32Platform {
         }
     }
 
-    fn minimize_window(&self, window: &PlatformWindow) {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_MINIMIZE};
-        unsafe {
-            ShowWindow(window.hwnd() as HWND, SW_MINIMIZE);
-        }
-    }
-
     fn resize_window(&self, window: &PlatformWindow, width: i32, height: i32) {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOZORDER,
@@ -414,9 +407,14 @@ impl Platform for Win32Platform {
     }
 
     fn run(&self) {
+        use windows_sys::Win32::Media::{timeBeginPeriod, timeEndPeriod};
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             DispatchMessageW, GetMessageW, TranslateMessage, MSG,
         };
+
+        // 把系统定时器分辨率提到 1ms:Windows 默认 15.6ms 量化,
+        // 会让 WM_TIMER 帧间隔在 15/31ms 间抖动,动画观感「卡」喵。
+        unsafe { timeBeginPeriod(1) };
 
         let mut msg: MSG = unsafe { zeroed() };
         // 全局消息泵: GetMessageW 返回 0 表示收到 WM_QUIT,退出喵
@@ -426,6 +424,7 @@ impl Platform for Win32Platform {
                 DispatchMessageW(&msg);
             }
         }
+        unsafe { timeEndPeriod(1) };
         log::debug!("消息循环退出喵");
     }
 
@@ -444,6 +443,20 @@ impl Platform for Win32Platform {
         unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
     }
 
+    fn display_refresh_rate(&self) -> u32 {
+        use windows_sys::Win32::Graphics::Gdi::{EnumDisplaySettingsW, DEVMODEW, ENUM_CURRENT_SETTINGS};
+        let mut dm: DEVMODEW = unsafe { zeroed() };
+        let ok = unsafe {
+            EnumDisplaySettingsW(std::ptr::null(), ENUM_CURRENT_SETTINGS, &mut dm)
+        };
+        if ok != 0 && dm.dmDisplayFrequency > 0 {
+            dm.dmDisplayFrequency
+        } else {
+            log::debug!("无法读取显示刷新率,回退 60Hz 喵");
+            60
+        }
+    }
+
     fn platform_name(&self) -> &'static str {
         "windows"
     }
@@ -459,7 +472,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_BACK;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         DefWindowProcW, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-        WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT, WM_TIMER,
+        WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT, WM_SYSKEYDOWN, WM_TIMER,
     };
 
     match msg {
@@ -468,15 +481,24 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             with_window_handler(hwnd, |h| h.on_event(WindowEvent::Hotkey));
             0
         }
-        // 导航键按下喵
-        WM_KEYDOWN => {
+        // 按键按下(含 Alt 组合的 WM_SYSKEYDOWN): 导航键 + 热键组合录制喵
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
             let vk = wparam as u16;
-            if let Some(key) = map_key(vk) {
-                with_window_handler(hwnd, |h| h.on_event(WindowEvent::KeyDown(key)));
+            if msg == WM_KEYDOWN {
+                if let Some(key) = map_key(vk) {
+                    with_window_handler(hwnd, |h| h.on_event(WindowEvent::KeyDown(key)));
+                }
+                // 特殊: 退格键不会产生 WM_CHAR,单独处理喵
+                if vk == VK_BACK {
+                    with_window_handler(hwnd, |h| h.on_event(WindowEvent::KeyDown(Key::Backspace)));
+                }
             }
-            // 特殊: 退格键不会产生 WM_CHAR,单独处理喵
-            if vk == VK_BACK {
-                with_window_handler(hwnd, |h| h.on_event(WindowEvent::KeyDown(Key::Backspace)));
+            // 热键录制: 修饰键 + 主键组合喵(各窗口 handler 按需消费)喵
+            if let Some(name) = vk_name(vk) {
+                with_window_handler(hwnd, |h| h.on_event(WindowEvent::HotkeyChord {
+                    modifiers: current_modifiers(),
+                    key: name,
+                }));
             }
             0
         }
@@ -691,6 +713,54 @@ fn map_key(vk: u16) -> Option<Key> {
         VK_DELETE => Some(Key::Delete),
         _ => None,
     }
+}
+
+/// 虚拟键码 → 热键主键名喵(与 parse_hotkey 词表一致)喵
+fn vk_name(vk: u16) -> Option<String> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        VK_BACK, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB,
+        VK_UP,
+    };
+    let name = match vk {
+        0x30..=0x39 => char::from_u32(vk as u32)?.to_string(),                        // 0-9
+        0x41..=0x5A => char::from_u32(vk as u32)?.to_ascii_lowercase().to_string(),  // a-z
+        0x70..=0x87 => format!("f{}", vk - 0x70 + 1),                              // f1-f24
+        VK_SPACE => "space".into(),
+        VK_RETURN => "enter".into(),
+        VK_ESCAPE => "esc".into(),
+        VK_TAB => "tab".into(),
+        VK_BACK => "backspace".into(),
+        VK_DELETE => "delete".into(),
+        VK_UP => "up".into(),
+        VK_DOWN => "down".into(),
+        VK_LEFT => "left".into(),
+        VK_RIGHT => "right".into(),
+        0xC0 => "tilde".into(),
+        _ => return None,
+    };
+    Some(name)
+}
+
+/// 当前按住的修饰键组合("ctrl+alt" 风格,与 parse_hotkey 一致)喵
+fn current_modifiers() -> String {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
+    let mut parts = Vec::new();
+    unsafe {
+        // 高位置 1 表示键处于按下状态喵
+        if (GetKeyState(0x11) & 0x80) != 0 {
+            parts.push("ctrl");
+        }
+        if (GetKeyState(0x12) & 0x80) != 0 {
+            parts.push("alt");
+        }
+        if (GetKeyState(0x10) & 0x80) != 0 {
+            parts.push("shift");
+        }
+        if (GetKeyState(0x5B) & 0x80) != 0 || (GetKeyState(0x5C) & 0x80) != 0 {
+            parts.push("win");
+        }
+    }
+    parts.join("+")
 }
 
 /// 给分层窗挂上默认 IME 上下文,否则中文输入法常常出不来喵

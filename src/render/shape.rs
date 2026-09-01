@@ -1,23 +1,18 @@
 //! 形状工具喵~
 //!
-//! 提供灵动岛的核心几何: 连续曲率圆角(超椭圆近似)喵。
-//! 普通圆角(简单圆弧)在直线与圆弧衔接处曲率跳变,视觉上「圆得生硬」;
-//! 连续曲率圆角从直线平滑过渡到圆弧,iOS 灵动岛质感即源于此喵。
-//!
-//! 这里用超椭圆(superellipse)近似连续曲率圆角: 指数越高角越「方中带圆」,
-//! n=4 时观感接近 iOS 图标/灵动岛的连续曲率圆角喵。
+//! 提供灵动岛的核心几何: 真圆弧圆角喵。
+//! 每个角用一条圆锥曲线(conic)精确绘制四分之一圆弧:
+//! * 圆角 = 高度一半时 → 标准胶囊(两端半圆 + 平直顶底边),观感贴合原型喵
+//! * 相比折线/超椭圆采样,圆弧无锯齿、运动缩放不抖动、处处曲率连续喵
 
 use skia_safe::{Path, PathBuilder, Rect};
-use std::f32::consts::FRAC_PI_2;
 
-/// 超椭圆指数喵(越大角越方,4 为灵动岛推荐值)喵
-const N_EXP: f32 = 4.0;
-/// 每个圆角的采样段数喵(越多越平滑)喵
-const CORNER_STEPS: usize = 16;
+/// 四分之一圆弧的圆锥曲线权重(cos 45° ≈ 0.7071,Skia 圆角标准值)喵
+const QUARTER_ARC_K: f32 = 0.707_106_8;
 
-/// 生成圆角矩形路径,圆角采用连续曲率(超椭圆)喵
+/// 生成圆角矩形路径,圆角为真圆弧喵
 ///
-/// 圆角半径自动钳制到不超过矩形短边的一半,避免畸变喵。
+/// 圆角半径自动钳制到不超过矩形短边的一半;等于短边一半时即「胶囊」喵。
 pub fn rounded_rect_path(rect: Rect, radius: f32) -> Path {
     let r = radius.clamp(0.0, rect.width().min(rect.height()) / 2.0);
 
@@ -26,51 +21,26 @@ pub fn rounded_rect_path(rect: Rect, radius: f32) -> Path {
         return Path::rect(rect, None);
     }
 
-    let left = rect.left;
-    let top = rect.top;
+    let l = rect.left;
+    let t = rect.top;
     let right = rect.right;
-    let bottom = rect.bottom;
-
-    // 超椭圆采样: s = sin(θ)^(2/n), c = cos(θ)^(2/n),θ 从 0 扫到 π/2 喵。
-    // 注: f32 的 FRAC_PI_2 略大于精确 π/2,cos 可能返回微小负值,
-    // 开方负数会得 NaN,故钳制到非负喵。
-    let sc = |theta: f32| -> (f32, f32) {
-        let c = theta.cos().max(0.0).powf(2.0 / N_EXP);
-        let s = theta.sin().max(0.0).powf(2.0 / N_EXP);
-        (s, c)
-    };
+    let b = rect.bottom;
 
     let mut pb = PathBuilder::new();
-    // 起点: 顶边右端,之后按顺时针描边(顶→右→底→左)喵
-    pb.move_to((right - r, top));
-
-    // 右上角: 顶部 → 右侧(顺时针)喵
-    corner(&mut pb, |t| {
-        let (s, c) = sc(t * FRAC_PI_2);
-        (right - r + r * s, top + r - r * c)
-    });
-    // 右边直线喵
-    pb.line_to((right, bottom - r));
-    // 右下角: 右侧 → 底部(顺时针)喵
-    corner(&mut pb, |t| {
-        let (s, c) = sc(t * FRAC_PI_2);
-        (right - r + r * c, bottom - r + r * s)
-    });
-    // 底边直线喵
-    pb.line_to((left + r, bottom));
-    // 左下角: 底部 → 左侧(顺时针)喵
-    corner(&mut pb, |t| {
-        let (s, c) = sc(t * FRAC_PI_2);
-        (left + r - r * s, bottom - r + r * c)
-    });
-    // 左边直线喵
-    pb.line_to((left, top + r));
-    // 左上角: 左侧 → 顶部(顺时针)喵
-    corner(&mut pb, |t| {
-        let (s, c) = sc(t * FRAC_PI_2);
-        (left + r - r * c, top + r - r * s)
-    });
-
+    // 从顶边左端起,顺时针描边(顶 → 右 → 底 → 左)喵
+    pb.move_to((l + r, t));
+    pb.line_to((right - r, t));
+    // 右上角: 四分之一圆弧喵
+    pb.conic_to((right, t), (right, t + r), QUARTER_ARC_K);
+    pb.line_to((right, b - r));
+    // 右下角喵
+    pb.conic_to((right, b), (right - r, b), QUARTER_ARC_K);
+    pb.line_to((l + r, b));
+    // 左下角喵
+    pb.conic_to((l, b), (l, b - r), QUARTER_ARC_K);
+    pb.line_to((l, t + r));
+    // 左上角喵
+    pb.conic_to((l, t), (l + r, t), QUARTER_ARC_K);
     pb.close();
     pb.snapshot()
 }
@@ -81,26 +51,17 @@ pub fn capsule_path(rect: Rect) -> Path {
     rounded_rect_path(rect, rect.height() / 2.0)
 }
 
-/// 沿一个角的连续曲率曲线采样描边喵
-fn corner(pb: &mut PathBuilder, sample: impl Fn(f32) -> (f32, f32)) {
-    for i in 1..=CORNER_STEPS {
-        let t = i as f32 / CORNER_STEPS as f32;
-        let (x, y) = sample(t);
-        pb.line_to((x, y));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 胶囊路径应闭合且非空喵
+    /// 胶囊应闭合,顶点数 = 1 Move + 4 Line + 4 Conic(各 2 点)喵
     #[test]
     fn capsule_is_closed() {
         let rect = Rect::from_xywh(0.0, 0.0, 420.0, 44.0);
         let path = capsule_path(rect);
         assert!(!path.is_empty());
-        assert_eq!(path.count_points(), 4 * CORNER_STEPS + 4);
+        assert_eq!(path.count_points(), 1 + 4 + 4 * 2);
     }
 
     /// 圆角半径会被钳制到短边一半,避免畸变喵
@@ -135,5 +96,20 @@ mod tests {
             b.bottom,
             rect.bottom
         );
+    }
+
+    /// 半径 = 短边一半时,顶底边应保持平直(胶囊而非橄榄形)喵
+    #[test]
+    fn capsule_has_straight_edges() {
+        let rect = Rect::from_xywh(0.0, 0.0, 300.0, 46.0);
+        let path = capsule_path(rect);
+        let pts = path.points();
+        // Move 起点 = 顶边左端;第一条 LineTo 终点 = 顶边右端,两者 y 应相等喵
+        let (x0, y0) = (pts[0].x, pts[0].y);
+        let (x1, y1) = (pts[1].x, pts[1].y);
+        assert!((y0 - y1).abs() < 0.01, "顶边应水平喵 y0={y0} y1={y1}");
+        assert!(x1 > x0, "顶边应从左向右延伸喵");
+        // 顶边平直段的水平长度 = width - 2r·(顶边实际起止在 r 处)喵
+        assert!((x1 - x0 - (rect.width() - rect.height())).abs() < 0.01, "平直段长度不符");
     }
 }
