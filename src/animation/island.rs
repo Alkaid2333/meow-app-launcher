@@ -158,34 +158,6 @@ impl EasingName {
     }
 }
 
-/// 岛视觉皮肤喵
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IslandVisual {
-    #[default]
-    Ink,
-    Glass,
-    Outline,
-}
-
-impl IslandVisual {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Ink => "墨黑",
-            Self::Glass => "玻璃",
-            Self::Outline => "线稿",
-        }
-    }
-
-    pub fn cycle(self) -> Self {
-        match self {
-            Self::Ink => Self::Glass,
-            Self::Glass => Self::Outline,
-            Self::Outline => Self::Ink,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IslandConfig {
     pub width: f64,
@@ -210,6 +182,9 @@ pub struct IslandConfig {
     pub summon_squash: f64,
     #[serde(default = "def_margin")]
     pub margin: f64,
+    /// 动画帧率(Hz),0 = 跟随显示器刷新率喵
+    #[serde(rename = "animFps", default)]
+    pub anim_fps: u32,
     #[serde(default)]
     pub springs: SpringSet,
     #[serde(rename = "motionMode", default)]
@@ -222,8 +197,6 @@ pub struct IslandConfig {
     pub auto_morph: bool,
     #[serde(default = "def_true")]
     pub draggable: bool,
-    #[serde(default)]
-    pub visual: IslandVisual,
 }
 
 fn def_input_ratio() -> f64 {
@@ -267,13 +240,13 @@ impl Default for IslandConfig {
             slot_height: 34.0,
             summon_squash: 0.34,
             margin: 16.0,
+            anim_fps: 0,
             springs: SpringSet::default(),
             motion_mode: MotionMode::Spring,
             easing: EasingName::EaseOutQuint,
             reduce_motion: false,
             auto_morph: true,
             draggable: true,
-            visual: IslandVisual::Ink,
         }
     }
 }
@@ -509,6 +482,7 @@ impl DynamicIsland {
             && self.config.slot_height == next.slot_height
             && self.config.summon_squash == next.summon_squash
             && self.config.margin == next.margin
+            && self.config.anim_fps == next.anim_fps
             && self.config.motion_mode == next.motion_mode
             && self.config.springs == next.springs
             && self.config.reduce_motion == next.reduce_motion

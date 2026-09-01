@@ -35,6 +35,8 @@ pub struct Layout {
     pub radius: f32,
     /// 面板透明度喵
     pub panel_opacity: f32,
+    /// 滚动条(轨道, 滑块)喵,内容未溢出时为 None 喵
+    pub scrollbar: Option<(Rect, Rect)>,
     /// 整体透明度喵
     pub opacity: f32,
     /// 是否碰到安全边界喵
@@ -73,6 +75,34 @@ impl Layout {
             item_rects.push(Rect::from_xywh(item_x, y, panel.width(), ITEM_HEIGHT * s));
         }
 
+        // 滚动条几何: 内容超出面板时才出现,滑块高度与位置按比例映射喵
+        let scrollbar = if result_count > 0 && panel.height() > 8.0 {
+            let content_h = result_count as f32 * ITEM_HEIGHT * s;
+            if content_h > panel.height() + 0.5 {
+                let track = Rect::from_xywh(
+                    panel.right - 8.0,
+                    panel.top + 2.0,
+                    4.0,
+                    panel.height() - 4.0,
+                );
+                let thumb_h = (panel.height() * panel.height() / content_h).max(24.0);
+                let travel = panel.height() - 4.0 - thumb_h;
+                let max_scroll = content_h - panel.height();
+                let prog = (scroll_offset * s / max_scroll).clamp(0.0, 1.0);
+                let thumb = Rect::from_xywh(
+                    track.left,
+                    track.top + travel * prog,
+                    track.width(),
+                    thumb_h,
+                );
+                Some((track, thumb))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Self {
             window_width: island.width() + m * 2.0,
             window_height: island.height() + m * 2.0,
@@ -84,6 +114,7 @@ impl Layout {
             panel_height: panel.height(),
             radius: frame.radius as f32 * s,
             panel_opacity: frame.panel_opacity as f32,
+            scrollbar,
             opacity: frame.opacity as f32,
             hit: frame.hit_bottom || frame.hit_x,
         }

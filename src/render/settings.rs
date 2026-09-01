@@ -16,25 +16,25 @@ use skia_safe::{BlurStyle, Canvas, Color, MaskFilter, Paint, PaintStyle, Rect};
 pub const SETTINGS_WIDTH: f32 = 760.0;
 /// 配置窗口高度(逻辑 px)喵
 pub const SETTINGS_HEIGHT: f32 = 680.0;
-/// 窗口圆角喵
-pub const WINDOW_RADIUS: f32 = 14.0;
+/// 窗口圆角喵(Fluent 8px 到 12px 档,取 12)喵
+pub const WINDOW_RADIUS: f32 = 12.0;
 /// 侧边栏宽度喵
-pub const SIDEBAR_WIDTH: f32 = 168.0;
+pub const SIDEBAR_WIDTH: f32 = 176.0;
 
 /// 页头区高度(标题 + 副标题 + 分隔线)喵
-const HEADER_HEIGHT: f32 = 66.0;
+const HEADER_HEIGHT: f32 = 72.0;
 /// 导航行起始 y 喵
-const NAV_START_Y: f32 = 74.0;
-/// 导航行高度喵
-const NAV_ROW_HEIGHT: f32 = 34.0;
+const NAV_START_Y: f32 = 78.0;
+/// 导航行高度喵(NavigationView 行高)喵
+const NAV_ROW_HEIGHT: f32 = 36.0;
 /// 内容区左右内边距喵
-const CONTENT_PADDING: f32 = 22.0;
-/// 分组圆角喵
-const GROUP_RADIUS: f32 = 10.0;
+const CONTENT_PADDING: f32 = 24.0;
+/// 分组圆角喵(Fluent 卡片 8px)喵
+const GROUP_RADIUS: f32 = 8.0;
 /// 分组内边距喵
 const GROUP_PADDING: f32 = 14.0;
 /// 普通行高喵
-const ROW_HEIGHT: f32 = 46.0;
+const ROW_HEIGHT: f32 = 44.0;
 /// 分组标题行高喵
 const SECTION_HEIGHT: f32 = 30.0;
 /// 分组间距喵
@@ -42,6 +42,8 @@ const GROUP_GAP: f32 = 14.0;
 /// 调整类型徽章尺寸喵
 const CHIP_W: f32 = 34.0;
 const CHIP_H: f32 = 16.0;
+/// 控件圆角喵(Fluent 控件 4px)喵
+const CTRL_RADIUS: f32 = 4.0;
 
 /// 配置页面喵
 #[derive(Debug, Clone)]
@@ -133,9 +135,10 @@ pub enum RowHit {
 /// 配置行身份喵(热更新时不靠页面下标)喵
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowId {
-    DarkMode,
-    Backdrop,
-    Visual,
+    /// 主题预设切换喵
+    Theme,
+    /// 动画帧率切换喵
+    AnimFps,
     MotionMode,
     Easing,
     AutoMorph,
@@ -248,8 +251,8 @@ fn paint_sidebar(
     bg.set_anti_alias(true);
     canvas.draw_rect(sidebar_rect, &bg);
 
-    // 品牌块: 小徽标 + 产品名 + 版本喵
-    let logo = Rect::from_xywh(20.0, 20.0, 28.0, 28.0);
+    // 品牌块: 小徽标 + 产品全称 + 版本喵
+    let logo = Rect::from_xywh(16.0, 18.0, 30.0, 30.0);
     let logo_path = shape::rounded_rect_path(logo, 8.0);
     let mut lp = Paint::default();
     lp.set_color(theme.accent);
@@ -258,16 +261,16 @@ fn paint_sidebar(
     let mut gp = Paint::default();
     gp.set_color(Color::WHITE);
     gp.set_anti_alias(true);
-    crate::render::text::draw_centered(canvas, "喵", logo, &fonts.font(13.0), &gp);
+    crate::render::text::draw_centered(canvas, "喵", logo, &fonts.font(14.0), &gp);
 
     let mut tp = Paint::default();
     tp.set_color(theme.text);
     tp.set_anti_alias(true);
     crate::render::text::draw_clipped(
         canvas,
-        "meowal",
-        Rect::from_xywh(logo.right + 10.0, 18.0, SIDEBAR_WIDTH - logo.right - 20.0, 24.0),
-        &fonts.font(14.0),
+        "meow app launcher",
+        Rect::from_xywh(54.0, 15.0, SIDEBAR_WIDTH - 66.0, 22.0),
+        &fonts.font(11.5),
         &tp,
     );
     let mut vp = Paint::default();
@@ -275,9 +278,9 @@ fn paint_sidebar(
     vp.set_anti_alias(true);
     crate::render::text::draw_clipped(
         canvas,
-        &format!("配置台 v{}", env!("CARGO_PKG_VERSION")),
-        Rect::from_xywh(logo.right + 10.0, 40.0, SIDEBAR_WIDTH - logo.right - 20.0, 16.0),
-        &fonts.font(10.0),
+        &format!("配置面板 · v{}", env!("CARGO_PKG_VERSION")),
+        Rect::from_xywh(54.0, 37.0, SIDEBAR_WIDTH - 66.0, 16.0),
+        &fonts.font(9.5),
         &vp,
     );
 
@@ -286,8 +289,8 @@ fn paint_sidebar(
     hline.set_color(theme.control_border);
     hline.set_anti_alias(true);
     canvas.draw_line(
-        (14.0, 64.0),
-        (SIDEBAR_WIDTH - 14.0, 64.0),
+        (14.0, 62.0),
+        (SIDEBAR_WIDTH - 14.0, 62.0),
         &hline,
     );
 
@@ -298,16 +301,16 @@ fn paint_sidebar(
         let selected = i == current_page;
 
         if selected {
-            // 选中底色: 强调色 9% 的暖晕,配上左侧 4px 指示条(仪器台指针感)喵
-            let path = shape::rounded_rect_path(row_rect, 9.0);
+            // NavigationView 式选中态: 强调色淡底(8px 圆角) + 靠内指示条喵
+            let path = shape::rounded_rect_path(row_rect, 8.0);
             let a = theme.accent;
             let mut tint = Paint::default();
             tint.set_color(Color::from_argb(0x16, a.r(), a.g(), a.b()));
             tint.set_anti_alias(true);
             canvas.draw_path(&path, &tint);
 
-            let bar = Rect::from_xywh(14.0, row_rect.center_y() - 8.0, 4.0, 16.0);
-            let bar_path = shape::rounded_rect_path(bar, 2.0);
+            let bar = Rect::from_xywh(row_rect.left + 4.0, row_rect.center_y() - 8.0, 3.0, 16.0);
+            let bar_path = shape::rounded_rect_path(bar, 1.5);
             let mut bp = Paint::default();
             bp.set_color(theme.accent);
             bp.set_anti_alias(true);
@@ -315,7 +318,7 @@ fn paint_sidebar(
         }
 
         let glyph = match page.title.as_str() {
-            "巢穴" => "◉",
+            "常规" => "◉",
             "灵动岛" => "◎",
             "弹簧" => "∿",
             "应用" => "✧",
@@ -351,7 +354,7 @@ fn paint_close_button(
     hits: &mut Vec<(Rect, RowHit)>,
 ) {
     let rect = Rect::from_xywh(SETTINGS_WIDTH - 44.0, 14.0, 28.0, 28.0);
-    let path = shape::rounded_rect_path(rect, 8.0);
+    let path = shape::rounded_rect_path(rect, CTRL_RADIUS);
     // 底 + 描边喵
     let mut bg = Paint::default();
     bg.set_color(theme.group_bg);
@@ -390,17 +393,17 @@ fn paint_content(
         return 0.0;
     };
 
-    // 页头: 标题 + 副标题 + 分隔线(固定在顶部不滚动)喵
+    // 页头: 大标题 + 副标题 + 分隔线(固定在顶部不滚动)喵
     let mut tp = Paint::default();
     tp.set_color(theme.text);
     tp.set_anti_alias(true);
-    let title_rect = Rect::from_xywh(content_left + CONTENT_PADDING, 10.0, content_width - 100.0, 40.0);
-    crate::render::text::draw_clipped(canvas, &page.title, title_rect, &fonts.font(17.0), &tp);
+    let title_rect = Rect::from_xywh(content_left + CONTENT_PADDING, 12.0, content_width - 96.0, 26.0);
+    crate::render::text::draw_clipped(canvas, &page.title, title_rect, &fonts.font(18.0), &tp);
     let mut sp = Paint::default();
     sp.set_color(theme.text_dim);
     sp.set_anti_alias(true);
-    let sub_rect = Rect::from_xywh(content_left + CONTENT_PADDING, 36.0, content_width - 100.0, 22.0);
-    crate::render::text::draw_clipped(canvas, &page.subtitle, sub_rect, &fonts.font(10.5), &sp);
+    let sub_rect = Rect::from_xywh(content_left + CONTENT_PADDING, 42.0, content_width - 96.0, 18.0);
+    crate::render::text::draw_clipped(canvas, &page.subtitle, sub_rect, &fonts.font(11.5), &sp);
     let mut hline = Paint::default();
     hline.set_color(theme.control_border);
     hline.set_anti_alias(true);
@@ -420,7 +423,7 @@ fn paint_content(
     let mut pick_i = 0usize;
     let mut chip_i = 0usize;
 
-    for (gi, group) in page.groups.iter().enumerate() {
+    for group in &page.groups {
         // 计算分组高度喵
         let group_h = SECTION_HEIGHT + group.rows.len() as f32 * ROW_HEIGHT + GROUP_PADDING * 2.0;
         let group_rect = Rect::from_xywh(
@@ -430,31 +433,38 @@ fn paint_content(
             group_h,
         );
 
-        // 分组卡片底色喵
+        // 分组卡片: 底色 + 1px 描边(SettingsCard 式分层感)喵
         let path = shape::rounded_rect_path(group_rect, GROUP_RADIUS);
         let mut bg = Paint::default();
         bg.set_color(theme.group_bg);
         bg.set_anti_alias(true);
         canvas.draw_path(&path, &bg);
+        let mut card_border = Paint::default();
+        card_border.set_color(theme.control_border);
+        card_border.set_anti_alias(true);
+        card_border.set_style(PaintStyle::Stroke);
+        card_border.set_stroke_width(1.0);
+        canvas.draw_path(&path, &card_border);
 
-        // 分组标题: 序号徽标 + 标题喵
-        let mut seq = Paint::default();
-        seq.set_color(theme.accent);
-        seq.set_anti_alias(true);
-        crate::render::text::draw_clipped(
-            canvas,
-            &format!("{:02}", gi + 1),
-            Rect::from_xywh(group_rect.left + GROUP_PADDING, group_rect.top, 34.0, SECTION_HEIGHT),
-            &fonts.font(11.0),
-            &seq,
+        // 分组标题: Fluent caption 风格,前置强调色圆点喵
+        let dot = Rect::from_xywh(
+            group_rect.left + GROUP_PADDING + 2.0,
+            group_rect.top + (SECTION_HEIGHT - 6.0) / 2.0,
+            6.0,
+            6.0,
         );
+        let mut dp = Paint::default();
+        dp.set_color(theme.accent);
+        dp.set_anti_alias(true);
+        canvas.draw_circle(dot.center(), 3.0, &dp);
+
         let mut title_paint = Paint::default();
         title_paint.set_color(theme.text_dim);
         title_paint.set_anti_alias(true);
         let title_rect = Rect::from_xywh(
-            group_rect.left + GROUP_PADDING + 34.0,
+            group_rect.left + GROUP_PADDING + 14.0,
             group_rect.top,
-            group_rect.width() - GROUP_PADDING * 2.0 - 34.0,
+            group_rect.width() - GROUP_PADDING * 2.0 - 14.0,
             SECTION_HEIGHT,
         );
         crate::render::text::draw_clipped(canvas, &group.title, title_rect, &fonts.font(12.0), &title_paint);
@@ -561,7 +571,7 @@ fn paint_row(
             btn_rect.inset((0.0, 8.0));
             // 热键录制中: 高亮成强调色,提示「正在等待按键」喵
             let rec = *id == RowId::HotkeyRecord && recording;
-            let path = shape::rounded_rect_path(btn_rect, 8.0);
+            let path = shape::rounded_rect_path(btn_rect, CTRL_RADIUS);
             let mut bg = Paint::default();
             bg.set_color(if rec { theme.accent } else { theme.control_bg });
             bg.set_anti_alias(true);
@@ -587,7 +597,7 @@ fn paint_row(
             selected,
         } => {
             if *selected {
-                let path = shape::rounded_rect_path(rect, 8.0);
+                let path = shape::rounded_rect_path(rect, 6.0);
                 let mut bg = Paint::default();
                 bg.set_color(theme.accent);
                 bg.set_anti_alias(true);
@@ -647,7 +657,7 @@ fn paint_row(
         SettingsRow::Input { id, label, value } => {
             draw_row_label(canvas, theme, fonts, label, rect, 240.0);
             let box_rect = Rect::from_xywh(rect.right - 220.0, rect.center_y() - 14.0, 220.0, 28.0);
-            let path = shape::rounded_rect_path(box_rect, 7.0);
+            let path = shape::rounded_rect_path(box_rect, CTRL_RADIUS);
             let mut bg = Paint::default();
             bg.set_color(theme.control_bg);
             bg.set_anti_alias(true);
@@ -680,7 +690,7 @@ fn draw_value_box(
     editing: bool,
     draft: Option<&str>,
 ) {
-    let path = shape::rounded_rect_path(rect, 7.0);
+    let path = shape::rounded_rect_path(rect, CTRL_RADIUS);
     let mut bg = Paint::default();
     bg.set_color(theme.control_bg);
     bg.set_anti_alias(true);
@@ -810,7 +820,7 @@ fn draw_control_button(
     rect: Rect,
     symbol: &str,
 ) {
-    let path = shape::rounded_rect_path(rect, 7.0);
+    let path = shape::rounded_rect_path(rect, CTRL_RADIUS);
     let mut bg = Paint::default();
     bg.set_color(theme.control_bg);
     bg.set_anti_alias(true);

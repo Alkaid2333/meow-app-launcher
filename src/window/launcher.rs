@@ -25,8 +25,6 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// 动画帧间隔基准(ms)喵(实际按显示器刷新率对齐)喵
-const ANIM_INTERVAL_MS: u32 = 16;
 /// 光标闪烁间隔(ms)喵
 const CARET_INTERVAL_MS: u32 = 500;
 /// 隐藏时心跳(ms): 必须常驻,否则托盘命令永远排不空喵
@@ -381,35 +379,48 @@ impl Launcher {
     }
 
     /// 保证选中项在结果面板可视区内,必要时滚动喵
+    ///
+    /// 面板实际高度取自岛帧的 panel 几何(而非配置的展开高),
+    /// 否则视口估算偏大,选中项会「跑出窗口」却不滚动喵。
     fn ensure_selected_visible(&mut self) {
-        let (len, selected, max_h) = {
-            let state = self.state.borrow();
-            (
-                state.results.len(),
-                state.selected as f32,
-                state.config.window.height.max(80.0) as f32,
-            )
-        };
+        let frame = self.island.frame();
+        let panel_h = (frame.panel.h as f32 - 8.0).max(16.0);
+        let len = self.state.borrow().results.len();
         if len == 0 {
             self.scroll_offset = 0.0;
             return;
         }
-
+        let selected = self.state.borrow().selected as f32;
         let content_h = len as f32 * layout::ITEM_HEIGHT;
-        let panel_h = content_h.min(max_h);
 
         let item_top = selected * layout::ITEM_HEIGHT;
         let item_bottom = item_top + layout::ITEM_HEIGHT;
-        let view_bottom = self.scroll_offset + panel_h;
 
-        if item_top < self.scroll_offset {
-            self.scroll_offset = item_top;
-        } else if item_bottom > view_bottom {
-            self.scroll_offset = item_bottom - panel_h;
+        let mut scroll = self.scroll_offset;
+        if item_top < scroll {
+            scroll = item_top; // 选中跑到视口上方 → 回滚喵
+        } else if item_bottom > scroll + panel_h {
+            scroll = item_bottom - panel_h; // 选中跑到视口下方 → 下滚喵
         }
 
         let max_scroll = (content_h - panel_h).max(0.0);
-        self.scroll_offset = self.scroll_offset.clamp(0.0, max_scroll);
+        self.scroll_offset = scroll.clamp(0.0, max_scroll);
+    }
+
+    /// 滚轮滚动结果面板喵
+    fn on_wheel(&mut self, delta: f32) {
+        if !self.visible || !self.want_expanded() {
+            return;
+        }
+        let frame = self.island.frame();
+        let panel_h = (frame.panel.h as f32).max(1.0);
+        let content_h = self.state.borrow().results.len() as f32 * layout::ITEM_HEIGHT;
+        let max_scroll = (content_h - panel_h).max(0.0);
+        if max_scroll <= 0.0 {
+            return;
+        }
+        self.scroll_offset = (self.scroll_offset - delta / 120.0 * 48.0).clamp(0.0, max_scroll);
+        self.request_render();
     }
 
     /// 启动选中的应用并隐藏喵
@@ -547,10 +558,15 @@ impl Launcher {
         self.set_timer_interval(self.anim_interval());
     }
 
-    /// 动画帧间隔: 与显示器刷新率对齐,高刷屏不掉帧喵
+    /// 动画帧间隔: 优先取配置帧率,0 = 跟随显示器刷新率喵
     fn anim_interval(&self) -> u32 {
-        let refresh = self.platform.display_refresh_rate().max(30);
-        (1000 / refresh).clamp(6, ANIM_INTERVAL_MS + 4)
+        let cfg_fps = self.state.borrow().config.island.anim_fps;
+        let fps = if cfg_fps == 0 {
+            self.platform.display_refresh_rate().max(30)
+        } else {
+            cfg_fps.clamp(30, 144)
+        };
+        (1000 / fps).clamp(6, 16)
     }
 
     /// 设置定时器间隔,仅在实际变化时才重设喵
@@ -679,11 +695,7 @@ impl Launcher {
 
         let theme = {
             let state = self.state.borrow();
-            Theme::resolve(
-                state.config.theme.mode,
-                state.config.theme.backdrop,
-                state.config.island.visual,
-            )
+            Theme::resolve(state.config.theme.preset)
         };
         let caret_on = self.caret_on
             && self.visible
@@ -717,7 +729,7 @@ impl WindowHandler for Launcher {
             WindowEvent::MouseDown(x, y) => self.on_mouse_down(x, y),
             WindowEvent::MouseMove(x, y) => self.on_mouse_move(x, y),
             WindowEvent::MouseUp => self.on_mouse_up(),
-            WindowEvent::MouseWheel(_) => {}
+            WindowEvent::MouseWheel(delta) => self.on_wheel(delta),
             WindowEvent::LostFocus => {
                 if self.visible {
                     self.hide();

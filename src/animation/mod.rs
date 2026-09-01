@@ -6,7 +6,7 @@ pub mod island;
 pub mod springs;
 
 pub use island::{
-    DynamicIsland, IslandConfig, IslandFrame, IslandState, IslandTransition, IslandVisual,
+    DynamicIsland, IslandConfig, IslandFrame, IslandState, IslandTransition,
 };
 pub use springs::DurationBounce;
 
