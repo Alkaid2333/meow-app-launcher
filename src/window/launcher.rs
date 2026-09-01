@@ -86,6 +86,8 @@ pub struct Launcher {
     ime_preedit: String,
     /// 拖拽起点喵
     drag: Option<DragState>,
+    /// 滚动条拖动状态喵
+    drag_scroll: Option<ScrollDrag>,
     /// 刚拖完,吞掉下一次 click 喵
     just_dragged: bool,
     /// 当前生效的定时器间隔(ms,仅变化时重设,避免每帧重置导致抖动)喵
@@ -98,11 +100,24 @@ pub struct Launcher {
 struct DragState {
     origin_x: f64,
     origin_y: f64,
-    client_x: f32,
-    client_y: f32,
+    /// 拖拽起点(屏幕坐标): 窗口会随岛移动,必须锚定屏幕而非客户区,否则反馈抖动喵
+    anchor_screen_x: f32,
+    anchor_screen_y: f32,
     stage_w: f64,
     stage_h: f64,
     active: bool,
+}
+
+/// 滚动条拖动快照喵
+struct ScrollDrag {
+    /// 拖拽起点(客户区 y,滚动不移动窗口,可用客户区坐标)喵
+    anchor_y: f32,
+    /// 起点进度(0..1)喵
+    anchor_prog: f32,
+    /// 滑块可移动距离(物理 px)喵
+    travel: f32,
+    /// 最大滚动量(逻辑 px)喵
+    max_logical: f32,
 }
 
 impl Launcher {
@@ -123,7 +138,7 @@ impl Launcher {
         let mut island = DynamicIsland::new(island_cfg);
         island.set_stage(screen_w as f64 / scale as f64, screen_h as f64 / scale as f64);
         let frame = island.frame();
-        let layout = Layout::from_frame(&state.borrow().config, scale, &frame, 0, 0.0);
+        let layout = Layout::from_frame(&state.borrow().config, scale, &frame, &[], 0.0);
         let win_w = layout.window_width.ceil().max(1.0) as i32;
         let win_h = layout.window_height.ceil().max(1.0) as i32;
         let x = (frame.left as f32 * scale - layout::SHADOW_MARGIN * scale).round() as i32;
@@ -175,6 +190,7 @@ impl Launcher {
             commands,
             ime_preedit: String::new(),
             drag: None,
+            drag_scroll: None,
             just_dragged: false,
             timer_interval_ms: HEARTBEAT_MS,
             last_win_pos: None,
@@ -285,7 +301,7 @@ impl Launcher {
         self.request_render();
     }
 
-    /// 鼠标按下(点击条目启动 / 开始拖岛)喵
+    /// 鼠标按下(点击条目启动 / 拖滚动条 / 开始拖岛)喵
     fn on_mouse_down(&mut self, x: f32, y: f32) {
         if self.just_dragged {
             self.just_dragged = false;
@@ -293,6 +309,26 @@ impl Launcher {
         }
         let scale = self.platform.scale_factor();
         let layout = self.current_layout(scale);
+
+        // 滚动条命中优先(轨道周边加宽命中区,支持拖动滑块)喵
+        if let Some((track, thumb)) = layout.scrollbar {
+            let on_track = x >= track.left - 4.0
+                && x <= track.right + 4.0
+                && y >= track.top - 4.0
+                && y <= track.bottom + 4.0;
+            if on_track {
+                let max_px = (layout.content_height - layout.panel_rect.height()).max(0.5);
+                let prog = (self.scroll_offset * scale / max_px).clamp(0.0, 1.0);
+                self.drag_scroll = Some(ScrollDrag {
+                    anchor_y: y,
+                    anchor_prog: prog,
+                    travel: (track.height() - thumb.height()).max(1.0),
+                    max_logical: max_px / scale,
+                });
+                return;
+            }
+        }
+
         for (i, rect) in layout.item_rects.iter().enumerate() {
             if rect.left <= x && x <= rect.right && rect.top <= y && y <= rect.bottom {
                 if matches!(self.state.borrow().results.get(i), Some(ListItem::Section(_))) {
@@ -306,11 +342,14 @@ impl Launcher {
         if self.state.borrow().config.island.draggable {
             let (sw, sh) = self.platform.screen_size();
             let cfg = &self.state.borrow().config.island;
+            // 锚定屏幕坐标: 岛随鼠标移动时窗口也在动,客户区坐标会漂移,
+            // 只有屏幕坐标差值才是真实位移喵
+            let (wx, wy) = self.last_win_pos.unwrap_or((0, 0));
             self.drag = Some(DragState {
                 origin_x: cfg.x,
                 origin_y: cfg.y,
-                client_x: x,
-                client_y: y,
+                anchor_screen_x: wx as f32 + x,
+                anchor_screen_y: wy as f32 + y,
                 stage_w: sw as f64 / scale as f64,
                 stage_h: sh as f64 / scale as f64,
                 active: false,
@@ -319,11 +358,22 @@ impl Launcher {
     }
 
     fn on_mouse_move(&mut self, x: f32, y: f32) {
+        // 拖动滚动条: 滚动不移动窗口,客户区坐标稳定可用喵
+        if let Some(ref ds) = self.drag_scroll {
+            let dy = y - ds.anchor_y;
+            let prog = (ds.anchor_prog + dy / ds.travel).clamp(0.0, 1.0);
+            self.scroll_offset = prog * ds.max_logical;
+            self.request_render();
+            return;
+        }
+
         let Some(drag) = self.drag.as_mut() else {
             return;
         };
-        let dx = x - drag.client_x;
-        let dy = y - drag.client_y;
+        // 当前屏幕坐标 = 窗口屏幕位置 + 客户区坐标喵
+        let (wx, wy) = self.last_win_pos.unwrap_or((0, 0));
+        let dx = (wx as f32 + x) - drag.anchor_screen_x;
+        let dy = (wy as f32 + y) - drag.anchor_screen_y;
         if !drag.active && dx.abs() < DRAG_SLOP && dy.abs() < DRAG_SLOP {
             return;
         }
@@ -343,6 +393,7 @@ impl Launcher {
     }
 
     fn on_mouse_up(&mut self) {
+        self.drag_scroll = None;
         if let Some(drag) = self.drag.take()
             && drag.active
         {
@@ -380,31 +431,30 @@ impl Launcher {
 
     /// 保证选中项在结果面板可视区内,必要时滚动喵
     ///
-    /// 面板实际高度取自岛帧的 panel 几何(而非配置的展开高),
-    /// 否则视口估算偏大,选中项会「跑出窗口」却不滚动喵。
+    /// 布局几何统一用 `current_layout` 的物理像素矩形计算(网格/列表都适用),
+    /// 修正旧实现按配置高度估算视口导致的「选中跑出窗口却不滚动」喵。
     fn ensure_selected_visible(&mut self) {
-        let frame = self.island.frame();
-        let panel_h = (frame.panel.h as f32 - 8.0).max(16.0);
-        let len = self.state.borrow().results.len();
-        if len == 0 {
+        if self.state.borrow().results.is_empty() {
             self.scroll_offset = 0.0;
             return;
         }
-        let selected = self.state.borrow().selected as f32;
-        let content_h = len as f32 * layout::ITEM_HEIGHT;
+        let scale = self.platform.scale_factor().max(0.01);
+        let layout = self.current_layout(scale);
+        let panel = layout.panel_rect;
+        let pad = 8.0 * scale;
 
-        let item_top = selected * layout::ITEM_HEIGHT;
-        let item_bottom = item_top + layout::ITEM_HEIGHT;
-
-        let mut scroll = self.scroll_offset;
-        if item_top < scroll {
-            scroll = item_top; // 选中跑到视口上方 → 回滚喵
-        } else if item_bottom > scroll + panel_h {
-            scroll = item_bottom - panel_h; // 选中跑到视口下方 → 下滚喵
+        let Some(r) = layout.item_rects.get(self.state.borrow().selected) else {
+            return;
+        };
+        let mut scroll_px = self.scroll_offset * scale;
+        if r.top < panel.top + pad {
+            scroll_px = r.top - panel.top - pad; // 选中跑到视口上方 → 回滚喵
+        } else if r.bottom > panel.bottom - pad {
+            scroll_px = r.bottom - (panel.bottom - pad); // 选中跑到视口下方 → 下滚喵
         }
 
-        let max_scroll = (content_h - panel_h).max(0.0);
-        self.scroll_offset = scroll.clamp(0.0, max_scroll);
+        let max_px = (layout.content_height - panel.height()).max(0.0);
+        self.scroll_offset = scroll_px.clamp(0.0, max_px) / scale;
     }
 
     /// 滚轮滚动结果面板喵
@@ -412,14 +462,15 @@ impl Launcher {
         if !self.visible || !self.want_expanded() {
             return;
         }
-        let frame = self.island.frame();
-        let panel_h = (frame.panel.h as f32).max(1.0);
-        let content_h = self.state.borrow().results.len() as f32 * layout::ITEM_HEIGHT;
-        let max_scroll = (content_h - panel_h).max(0.0);
-        if max_scroll <= 0.0 {
+        let scale = self.platform.scale_factor().max(0.01);
+        let layout = self.current_layout(scale);
+        let max_px = (layout.content_height - layout.panel_rect.height()).max(0.0);
+        if max_px <= 0.0 {
             return;
         }
-        self.scroll_offset = (self.scroll_offset - delta / 120.0 * 48.0).clamp(0.0, max_scroll);
+        let cur = self.scroll_offset * scale;
+        let next = (cur - delta / 120.0 * 48.0 * scale).clamp(0.0, max_px);
+        self.scroll_offset = next / scale;
         self.request_render();
     }
 
@@ -651,13 +702,12 @@ impl Launcher {
         );
         let frame = self.island.frame();
         let state = self.state.borrow();
-        Layout::from_frame(
-            &state.config,
-            scale,
-            &frame,
-            state.results.len(),
-            self.scroll_offset,
-        )
+        let sections: Vec<bool> = state
+            .results
+            .iter()
+            .map(|i| matches!(i, ListItem::Section(_)))
+            .collect();
+        Layout::from_frame(&state.config, scale, &frame, &sections, self.scroll_offset)
     }
 
     /// 渲染一帧并呈现喵
@@ -669,13 +719,12 @@ impl Launcher {
         let frame = self.island.frame();
         let layout = {
             let state = self.state.borrow();
-            Layout::from_frame(
-                &state.config,
-                scale,
-                &frame,
-                state.results.len(),
-                self.scroll_offset,
-            )
+            let sections: Vec<bool> = state
+                .results
+                .iter()
+                .map(|i| matches!(i, ListItem::Section(_)))
+                .collect();
+            Layout::from_frame(&state.config, scale, &frame, &sections, self.scroll_offset)
         };
 
         let w = layout.window_width.ceil().max(1.0) as i32;
