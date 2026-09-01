@@ -5,7 +5,6 @@
 //!
 //! 托盘不直接操作窗口,而是把意图投递到应用命令队列,由启动器(应用控制器)统一执行喵。
 
-use crate::app::config::ThemeMode;
 use crate::app::{Command, SharedState};
 use crate::platform::{Platform, TrayEvent, TrayHandle, TrayHandler, TrayMenuItem};
 use std::cell::RefCell;
@@ -44,7 +43,8 @@ impl Tray {
             std::process::exit(1);
         });
 
-        let dark = state.borrow().config.theme.mode == ThemeMode::Dark;
+        // 主题预设均为浅色,托盘图标固定用深色线稿(保证在浅色托盘上可见)喵
+        let dark = false;
         let mut handler = Tray {
             state: state.clone(),
             commands,
@@ -55,7 +55,7 @@ impl Tray {
 
         // 初始图标 + 提示 + 菜单喵
         handler.apply_icon();
-        platform.set_tray_tip(&tray, "喵喵应用启动器");
+        platform.set_tray_tip(&tray, "meow app launcher");
         handler.refresh_menu();
 
         platform.set_tray_handler(&tray, Box::new(handler));
@@ -63,9 +63,9 @@ impl Tray {
         tray
     }
 
-    /// 判断当前是否深色主题喵
+    /// 判断当前是否深色主题喵(主题预设均为浅色,恒为 false)喵
     fn is_dark(&self) -> bool {
-        self.state.borrow().config.theme.mode == ThemeMode::Dark
+        false
     }
 
     /// 按当前主题更新托盘图标喵

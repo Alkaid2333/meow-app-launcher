@@ -6,7 +6,7 @@
 //! 状态机: 常驻(隐藏) → 收到 `settings_visible` 标志 → 显示并渲染 → 红点关闭喵。
 
 use crate::animation::{DurationBounce, IslandTransition};
-use crate::app::config::{AppConfig, SearchMode, ThemeMode};
+use crate::app::config::{AppConfig, SearchMode};
 use crate::app::{Command, SharedState};
 use crate::platform::{Platform, PlatformWindow, WindowEvent, WindowHandler};
 use crate::render::font::FontCache;
@@ -163,7 +163,7 @@ impl SettingsWindow {
         };
         let theme = {
             let state = self.state.borrow();
-            SettingsTheme::for_mode(state.config.theme.mode)
+            SettingsTheme::for_preset(state.config.theme.preset)
         };
 
         let canvas = self.renderer.canvas();
@@ -269,13 +269,6 @@ impl SettingsWindow {
     fn toggle_switch(&mut self, id: RowId) {
         let mut state = self.state.borrow_mut();
         match id {
-            RowId::DarkMode => {
-                state.config.theme.mode = if state.config.theme.mode == ThemeMode::Dark {
-                    ThemeMode::Light
-                } else {
-                    ThemeMode::Dark
-                };
-            }
             RowId::AlwaysOnTop => state.config.window.always_on_top = !state.config.window.always_on_top,
             RowId::HotkeyEnabled => state.config.hotkey.enabled = !state.config.hotkey.enabled,
             RowId::ShowRecent => state.config.window.show_recent = !state.config.window.show_recent,
@@ -396,17 +389,20 @@ impl SettingsWindow {
                 self.hotkey_capture = true;
                 log::info!("热键录制中,请按下新组合键喵~");
             }
-            RowId::Backdrop => {
+            RowId::Theme => {
                 let mut state = self.state.borrow_mut();
-                state.config.theme.backdrop = state.config.theme.backdrop.cycle();
+                state.config.theme.preset = state.config.theme.preset.cycle();
                 state.persist();
-                log::info!("浮窗材质 → {} 喵", state.config.theme.backdrop.label());
+                log::info!("主题 → {} 喵", state.config.theme.preset.label());
             }
-            RowId::Visual => {
+            RowId::AnimFps => {
                 let mut state = self.state.borrow_mut();
-                state.config.island.visual = state.config.island.visual.cycle();
+                state.config.island.anim_fps = next_fps(state.config.island.anim_fps);
                 state.persist();
-                log::info!("岛视觉 → {} 喵", state.config.island.visual.label());
+                log::info!(
+                    "动画帧率 → {} 喵",
+                    fps_label(state.config.island.anim_fps)
+                );
             }
             RowId::MotionMode => {
                 let mut state = self.state.borrow_mut();
@@ -705,6 +701,27 @@ fn spring_label(i: u8) -> &'static str {
     spring_at(i).label()
 }
 
+/// 动画帧率档位循环: 0(跟随屏刷) → 30 → 60 → 90 → 120 → 144 喵
+fn next_fps(cur: u32) -> u32 {
+    match cur {
+        0 => 30,
+        30 => 60,
+        60 => 90,
+        90 => 120,
+        120 => 144,
+        _ => 0,
+    }
+}
+
+/// 帧率档位显示名喵
+fn fps_label(v: u32) -> String {
+    if v == 0 {
+        "自动(屏刷)".into()
+    } else {
+        format!("{v} Hz")
+    }
+}
+
 fn sw(id: RowId, label: &str, value: bool) -> SettingsRow {
     SettingsRow::Switch {
         id,
@@ -799,22 +816,15 @@ fn build_pages(
 
     vec![
         SettingsPage {
-            title: "巢穴".into(),
-            subtitle: "外观 · 浮窗与热键 · 列表显示喵".into(),
+            title: "常规".into(),
+            subtitle: "主题 · 热键 · 列表显示喵".into(),
             groups: vec![
                 SettingsGroup {
                     title: "外观".into(),
-                    rows: vec![
-                        sw(RowId::DarkMode, "墨夜模式", config.theme.mode == ThemeMode::Dark),
-                        btn(
-                            RowId::Backdrop,
-                            format!("浮窗材质 · {}", config.theme.backdrop.label()),
-                        ),
-                        btn(
-                            RowId::Visual,
-                            format!("岛皮肤 · {}", island.visual.label()),
-                        ),
-                    ],
+                    rows: vec![btn(
+                        RowId::Theme,
+                        format!("主题 · {}", config.theme.preset.label()),
+                    )],
                 },
                 SettingsGroup {
                     title: "热键".into(),
@@ -933,6 +943,10 @@ fn build_pages(
                         sw(RowId::Draggable, "允许拖拽定位", island.draggable),
                         sw(RowId::ReduceMotion, "减少动效", island.reduce_motion),
                         btn(
+                            RowId::AnimFps,
+                            format!("动画帧率 · {}", fps_label(island.anim_fps)),
+                        ),
+                        btn(
                             RowId::MotionMode,
                             format!("运动引擎 · {}", island.motion_mode.label()),
                         ),
@@ -979,8 +993,12 @@ fn build_pages(
                         value: env!("CARGO_PKG_VERSION").into(),
                     },
                     SettingsRow::Label {
-                        label: "项目".into(),
-                        value: "meow-app-launcher".into(),
+                        label: "全称".into(),
+                        value: "meow app launcher".into(),
+                    },
+                    SettingsRow::Label {
+                        label: "指令".into(),
+                        value: "meowal".into(),
                     },
                     SettingsRow::Label {
                         label: "岛内核".into(),

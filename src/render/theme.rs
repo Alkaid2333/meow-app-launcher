@@ -1,17 +1,16 @@
 //! 主题喵~
 //!
-//! 语义化配色 token。岛视觉(ink/glass/outline) × 浅/深色喵。
+//! 材质与配色融合为「主题预设」: 毛玻璃 / 云母 / 不透明,三档均为浅色喵。
+//! 每个预设的文字色与底材成对提供,任何组合下对比度都有保证,
+//! 不再出现「玻璃材质配黑字看不清」的问题喵。
 //! 页面里禁止写死色值,一律走主题 token 喵。
 
-use crate::animation::IslandVisual;
-use crate::app::config::{Backdrop, ThemeMode};
+use crate::app::config::ThemePreset;
 use skia_safe::Color;
 
 /// 启动器主题色板喵
 #[derive(Debug, Clone, Copy)]
 pub struct Theme {
-    /// 浮窗/面板背景喵
-    pub background: Color,
     /// 描边喵
     pub border: Color,
     /// 主文字喵
@@ -26,111 +25,51 @@ pub struct Theme {
     pub accent_text: Color,
     /// 面板阴影喵
     pub shadow: Color,
-    /// 背景材质喵
-    pub backdrop: Backdrop,
-    /// 材质填充(含透明度)喵
+    /// 岛体填充(含透明度,即材质)喵
     pub fill: Color,
-    /// 岛视觉喵
-    pub visual: IslandVisual,
+    /// 是否绘制玻璃噪点(毛玻璃专属)喵
+    pub glass: bool,
 }
 
 impl Theme {
-    /// 按配置取主题喵
-    pub fn resolve(mode: ThemeMode, backdrop: Backdrop, visual: IslandVisual) -> Self {
-        let mut theme = match (visual, mode) {
-            (IslandVisual::Ink, _) => Self::ink(),
-            (IslandVisual::Outline, ThemeMode::Dark) => Self::outline_dark(),
-            (IslandVisual::Outline, ThemeMode::Light) => Self::outline(),
-            (IslandVisual::Glass, ThemeMode::Dark) => Self::glass_dark(),
-            (IslandVisual::Glass, ThemeMode::Light) => Self::glass(),
-        };
-        theme.backdrop = backdrop;
-        theme.visual = visual;
-        theme.fill = match (visual, backdrop) {
-            (IslandVisual::Glass, _) => theme.fill,
-            (_, Backdrop::Opaque) => theme.background,
-            (_, Backdrop::Mica) => {
-                with_alpha(theme.background, if mode == ThemeMode::Light { 0xD8 } else { 0xC0 })
-            }
-            (_, Backdrop::Acrylic) => {
-                with_alpha(theme.background, if mode == ThemeMode::Light { 0xB8 } else { 0xA0 })
-            }
-        };
-        theme
-    }
-
-    /// 墨黑胶囊喵
-    pub fn ink() -> Self {
-        Self {
-            background: Color::from_argb(0xFF, 0x0B, 0x0B, 0x0D),
-            border: Color::from_argb(0x33, 0xFF, 0xFF, 0xFF),
-            text: Color::from_rgb(0xF4, 0xF1, 0xEA),
-            text_dim: Color::from_rgb(0x8C, 0x85, 0x77),
-            hover_bg: Color::from_argb(0xFF, 0x1A, 0x18, 0x16),
-            accent: Color::from_rgb(0xD9, 0x48, 0x1B),
-            accent_text: Color::from_rgb(0xFB, 0xE7, 0xDE),
-            shadow: Color::from_argb(0x3A, 0x00, 0x00, 0x00),
-            backdrop: Backdrop::Opaque,
-            fill: Color::from_argb(0xFF, 0x0B, 0x0B, 0x0D),
-            visual: IslandVisual::Ink,
-        }
-    }
-
-    /// 玻璃喵
-    pub fn glass() -> Self {
-        Self {
-            background: Color::from_argb(0x80, 0x0E, 0x0E, 0x11),
-            border: Color::from_argb(0x40, 0xFF, 0xFF, 0xFF),
-            text: Color::from_rgb(0x16, 0x15, 0x0F),
-            text_dim: Color::from_rgb(0x4B, 0x46, 0x3A),
-            hover_bg: Color::from_argb(0x40, 0xFF, 0xFF, 0xFF),
-            accent: Color::from_rgb(0x1F, 0x6B, 0x58),
-            accent_text: Color::from_rgb(0xFF, 0xFF, 0xFF),
-            shadow: Color::from_argb(0x28, 0x00, 0x00, 0x00),
-            backdrop: Backdrop::Acrylic,
-            fill: Color::from_argb(0x80, 0x0E, 0x0E, 0x11),
-            visual: IslandVisual::Glass,
-        }
-    }
-
-    pub fn glass_dark() -> Self {
-        let mut t = Self::glass();
-        t.text = Color::from_rgb(0xF4, 0xF1, 0xEA);
-        t.text_dim = Color::from_rgb(0x8C, 0x85, 0x77);
-        t.fill = Color::from_argb(0x90, 0x0E, 0x0E, 0x11);
-        t
-    }
-
-    /// 线稿喵
-    pub fn outline() -> Self {
-        Self {
-            background: Color::from_argb(0xFF, 0xFB, 0xF9, 0xF5),
-            border: Color::from_argb(0xFF, 0x16, 0x15, 0x0F),
-            text: Color::from_rgb(0x16, 0x15, 0x0F),
-            text_dim: Color::from_rgb(0x4B, 0x46, 0x3A),
-            hover_bg: Color::from_argb(0xFF, 0xF4, 0xF1, 0xEA),
-            accent: Color::from_rgb(0xD9, 0x48, 0x1B),
-            accent_text: Color::from_rgb(0xFB, 0xF9, 0xF5),
-            shadow: Color::from_argb(0x14, 0x00, 0x00, 0x00),
-            backdrop: Backdrop::Opaque,
-            fill: Color::from_argb(0xFF, 0xFB, 0xF9, 0xF5),
-            visual: IslandVisual::Outline,
-        }
-    }
-
-    pub fn outline_dark() -> Self {
-        Self {
-            background: Color::from_argb(0xFF, 0x16, 0x15, 0x0F),
-            border: Color::from_argb(0xFF, 0xF4, 0xF1, 0xEA),
-            text: Color::from_rgb(0xF4, 0xF1, 0xEA),
-            text_dim: Color::from_rgb(0x8C, 0x85, 0x77),
-            hover_bg: Color::from_argb(0xFF, 0x24, 0x22, 0x1A),
-            accent: Color::from_rgb(0xD9, 0x48, 0x1B),
-            accent_text: Color::from_rgb(0x16, 0x15, 0x0F),
-            shadow: Color::from_argb(0x40, 0x00, 0x00, 0x00),
-            backdrop: Backdrop::Opaque,
-            fill: Color::from_argb(0xFF, 0x16, 0x15, 0x0F),
-            visual: IslandVisual::Outline,
+    /// 按主题预设取主题喵
+    pub fn resolve(preset: ThemePreset) -> Self {
+        match preset {
+            ThemePreset::FrostedGlass => Self {
+                border: Color::from_argb(0x3C, 0x16, 0x15, 0x0F),
+                text: Color::from_rgb(0x16, 0x15, 0x0F),
+                text_dim: Color::from_rgb(0x55, 0x50, 0x44),
+                hover_bg: Color::from_argb(0xFF, 0xEF, 0xEC, 0xE4),
+                accent: Color::from_rgb(0xD9, 0x48, 0x1B),
+                accent_text: Color::from_rgb(0xFF, 0xFF, 0xFF),
+                shadow: Color::from_argb(0x24, 0x00, 0x00, 0x00),
+                // 高不透明度白,保证深色文字清晰可读喵
+                fill: Color::from_argb(0xF0, 0xFC, 0xFB, 0xF8),
+                glass: true,
+            },
+            ThemePreset::Mica => Self {
+                border: Color::from_argb(0x30, 0x16, 0x15, 0x0F),
+                text: Color::from_rgb(0x16, 0x15, 0x0F),
+                text_dim: Color::from_rgb(0x55, 0x50, 0x44),
+                hover_bg: Color::from_argb(0xFF, 0xE9, 0xE5, 0xDC),
+                // 云母预设走青苔绿强调色,与暖纸形成辨识度喵
+                accent: Color::from_rgb(0x1F, 0x6B, 0x58),
+                accent_text: Color::from_rgb(0xFF, 0xFF, 0xFF),
+                shadow: Color::from_argb(0x18, 0x00, 0x00, 0x00),
+                fill: Color::from_argb(0xF6, 0xF3, 0xF0, 0xEA),
+                glass: false,
+            },
+            ThemePreset::Opaque => Self {
+                border: Color::from_argb(0x55, 0x16, 0x15, 0x0F),
+                text: Color::from_rgb(0x16, 0x15, 0x0F),
+                text_dim: Color::from_rgb(0x4B, 0x46, 0x3A),
+                hover_bg: Color::from_argb(0xFF, 0xEF, 0xEC, 0xE4),
+                accent: Color::from_rgb(0xD9, 0x48, 0x1B),
+                accent_text: Color::from_rgb(0xFF, 0xFF, 0xFF),
+                shadow: Color::from_argb(0x14, 0x00, 0x00, 0x00),
+                fill: Color::from_argb(0xFF, 0xF7, 0xF4, 0xEE),
+                glass: false,
+            },
         }
     }
 }
@@ -139,7 +78,7 @@ fn with_alpha(color: Color, alpha: u8) -> Color {
     Color::from_argb(alpha, color.r(), color.g(), color.b())
 }
 
-/// 配置 GUI 主题色板喵
+/// 配置 GUI 主题色板喵(跟随主题预设,浅色 Fluent 风)喵
 #[derive(Debug, Clone, Copy)]
 pub struct SettingsTheme {
     pub win_bg: Color,
@@ -159,50 +98,38 @@ pub struct SettingsTheme {
 }
 
 impl SettingsTheme {
-    pub fn for_mode(mode: ThemeMode) -> Self {
-        match mode {
-            ThemeMode::Light => Self::light(),
-            ThemeMode::Dark => Self::dark(),
+    /// 按主题预设取配置 GUI 色板喵
+    pub fn for_preset(preset: ThemePreset) -> Self {
+        let mut t = Self::light();
+        // 窗口底色随预设微调: 毛玻璃半透明、云母带暖灰、不透明实心暖纸喵
+        t.win_bg = match preset {
+            ThemePreset::FrostedGlass => with_alpha(t.win_bg, 0xF2),
+            ThemePreset::Mica => Color::from_rgb(0xF0, 0xEC, 0xE3),
+            ThemePreset::Opaque => Color::from_rgb(0xF4, 0xF1, 0xEA),
+        };
+        if preset == ThemePreset::Mica {
+            t.accent = Color::from_rgb(0x1F, 0x6B, 0x58);
         }
+        t
     }
 
-    /// 暖纸浅色,不要苹果灰喵
+    /// 暖纸浅色基准,不要苹果灰喵
     pub fn light() -> Self {
         Self {
             win_bg: Color::from_rgb(0xF4, 0xF1, 0xEA),
-            sidebar_bg: Color::from_rgb(0xE7, 0xE1, 0xD4),
+            sidebar_bg: Color::from_rgb(0xEC, 0xE6, 0xDA),
             group_bg: Color::from_rgb(0xFB, 0xF9, 0xF5),
             text: Color::from_rgb(0x16, 0x15, 0x0F),
             text_dim: Color::from_rgb(0x4B, 0x46, 0x3A),
             disabled: Color::from_rgb(0x8C, 0x85, 0x77),
             accent: Color::from_rgb(0xD9, 0x48, 0x1B),
-            danger: Color::from_rgb(0xD9, 0x48, 0x1B),
+            danger: Color::from_rgb(0xC2, 0x3B, 0x22),
             toggle_on: Color::from_rgb(0x1F, 0x6B, 0x58),
-            toggle_off: Color::from_rgb(0xDE, 0xD9, 0xCC),
+            toggle_off: Color::from_rgb(0xD6, 0xD0, 0xC3),
             control_bg: Color::from_rgb(0xFF, 0xFF, 0xFF),
             control_border: Color::from_argb(0x40, 0x16, 0x15, 0x0F),
             shadow: Color::from_argb(0x18, 0x16, 0x15, 0x0F),
             moss: Color::from_rgb(0x1F, 0x6B, 0x58),
-        }
-    }
-
-    /// 墨夜深色喵
-    pub fn dark() -> Self {
-        Self {
-            win_bg: Color::from_rgb(0x12, 0x11, 0x0E),
-            sidebar_bg: Color::from_rgb(0x0B, 0x0B, 0x0D),
-            group_bg: Color::from_rgb(0x1C, 0x1A, 0x16),
-            text: Color::from_rgb(0xF4, 0xF1, 0xEA),
-            text_dim: Color::from_rgb(0x8C, 0x85, 0x77),
-            disabled: Color::from_rgb(0x4B, 0x46, 0x3A),
-            accent: Color::from_rgb(0xD9, 0x48, 0x1B),
-            danger: Color::from_rgb(0xD9, 0x48, 0x1B),
-            toggle_on: Color::from_rgb(0x1F, 0x6B, 0x58),
-            toggle_off: Color::from_rgb(0x2A, 0x27, 0x22),
-            control_bg: Color::from_rgb(0x24, 0x22, 0x1C),
-            control_border: Color::from_argb(0x28, 0xF4, 0xF1, 0xEA),
-            shadow: Color::from_argb(0x50, 0x00, 0x00, 0x00),
-            moss: Color::from_rgb(0x3D, 0xA3, 0x88),
         }
     }
 }

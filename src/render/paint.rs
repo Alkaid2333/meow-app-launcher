@@ -1,8 +1,7 @@
 //! 启动器场景绘制喵~
 //!
-//! 一体灵动岛: 搜索槽与结果面板合成一块超椭圆,视觉走 ink/glass/outline 喵。
+//! 一体灵动岛: 搜索槽与结果面板合成一块连续曲率圆角,视觉随主题预设喵。
 
-use crate::animation::IslandVisual;
 use crate::app::{AppState, ListItem};
 use crate::render::font::FontCache;
 use crate::render::layout::Layout;
@@ -68,8 +67,8 @@ fn draw_island(canvas: &Canvas, theme: &Theme, layout: &Layout) {
     fill.set_anti_alias(true);
     canvas.draw_path(&path, &fill);
 
-    // 玻璃材质加细噪点;顶部高光横线已移除,避免透明主题下突兀的亮线喵
-    if theme.visual == IslandVisual::Glass {
+    // 毛玻璃材质加细噪点;文字色与底材在主题预设内成对出现,对比有保证喵
+    if theme.glass {
         draw_noise(canvas, rect, 5, 26);
     }
 
@@ -81,11 +80,7 @@ fn draw_island(canvas: &Canvas, theme: &Theme, layout: &Layout) {
     });
     stroke.set_anti_alias(true);
     stroke.set_style(skia_safe::PaintStyle::Stroke);
-    stroke.set_stroke_width(if theme.visual == IslandVisual::Outline {
-        1.5
-    } else {
-        1.25
-    });
+    stroke.set_stroke_width(1.25);
     canvas.draw_path(&path, &stroke);
 }
 
@@ -229,6 +224,26 @@ fn draw_items(
         }
     }
     canvas.restore();
+
+    // 滚动条(内容溢出时出现)喵
+    if let Some((track, thumb)) = layout.scrollbar {
+        draw_scrollbar(canvas, theme, track, thumb);
+    }
+}
+
+/// 绘制面板滚动条喵: 细轨道 + 强调色圆角滑块,贴合面板右缘喵
+fn draw_scrollbar(canvas: &Canvas, theme: &Theme, track_rect: Rect, thumb_rect: Rect) {
+    let track_path = shape::rounded_rect_path(track_rect, track_rect.width() / 2.0);
+    let mut track = Paint::default();
+    track.set_color(theme.hover_bg);
+    track.set_anti_alias(true);
+    canvas.draw_path(&track_path, &track);
+
+    let thumb_path = shape::rounded_rect_path(thumb_rect, thumb_rect.width() / 2.0);
+    let mut thumb = Paint::default();
+    thumb.set_color(theme.accent);
+    thumb.set_anti_alias(true);
+    canvas.draw_path(&thumb_path, &thumb);
 }
 
 fn draw_section(canvas: &Canvas, theme: &Theme, rect: &Rect, title: &str, fonts: &FontCache) {

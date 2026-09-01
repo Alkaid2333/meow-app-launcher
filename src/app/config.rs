@@ -13,15 +13,38 @@ pub const CONFIG_FILE_NAME: &str = "config.json";
 /// 应用注册文件路径(相对数据目录)喵
 pub const APPS_FILE_NAME: &str = "apps.json";
 
-/// 主题模式喵
+/// 主题预设喵: 材质与配色融合成一体,三档均为浅色,
+/// 文字色与底材成对出现,任何预设下对比度都有保证喵。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum ThemeMode {
-    /// 浅色喵
+pub enum ThemePreset {
+    /// 毛玻璃: 半透明白 + 细噪点质感,深色文字喵
     #[default]
-    Light,
-    /// 深色喵
-    Dark,
+    FrostedGlass,
+    /// 云母: 不透明桌面染色,深色文字、青苔绿强调色喵
+    Mica,
+    /// 不透明: 实心暖纸,描边更强,深色文字喵
+    Opaque,
+}
+
+impl ThemePreset {
+    /// 给配置 GUI 看的名字喵
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FrostedGlass => "毛玻璃",
+            Self::Mica => "云母",
+            Self::Opaque => "不透明",
+        }
+    }
+
+    /// 循环切换预设喵
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::FrostedGlass => Self::Mica,
+            Self::Mica => Self::Opaque,
+            Self::Opaque => Self::FrostedGlass,
+        }
+    }
 }
 
 /// 应用排列样式喵
@@ -108,54 +131,18 @@ impl Default for WindowConfig {
     }
 }
 
-/// 浮窗背景材质喵(分层窗上用 Skia 拟真,贴不上系统云母)喵
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum Backdrop {
-    /// 不透明喵
-    #[default]
-    Opaque,
-    /// 云母拟真(半透明 + 细噪点)喵
-    Mica,
-    /// 毛玻璃拟真(更透 + 密噪点)喵
-    Acrylic,
-}
-
-impl Backdrop {
-    /// 循环切换材质喵
-    pub fn cycle(self) -> Self {
-        match self {
-            Self::Opaque => Self::Mica,
-            Self::Mica => Self::Acrylic,
-            Self::Acrylic => Self::Opaque,
-        }
-    }
-
-    /// 给配置 GUI 看的名字喵
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Opaque => "不透明",
-            Self::Mica => "云母",
-            Self::Acrylic => "毛玻璃",
-        }
-    }
-}
-
-/// 主题配置喵
+/// 主题配置喵(材质与配色已融合,仅一档预设可调)喵
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThemeConfig {
-    /// 主题模式喵
-    pub mode: ThemeMode,
-    /// 浮窗背景材质喵
+    /// 主题预设喵
     #[serde(default)]
-    pub backdrop: Backdrop,
+    pub preset: ThemePreset,
 }
 
 impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
-            mode: ThemeMode::Light,
-            backdrop: Backdrop::Opaque,
+            preset: ThemePreset::FrostedGlass,
         }
     }
 }
@@ -207,7 +194,6 @@ impl Default for AppConfig {
         }
     }
 }
-
 
 impl AppConfig {
     /// 加载配置喵,文件不存在或解析失败时生成默认配置喵~
