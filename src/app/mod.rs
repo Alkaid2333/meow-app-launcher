@@ -115,7 +115,8 @@ impl AppState {
     }
 
     /// 保存全部持久化数据喵(配置 + 注册表)喵
-    pub fn persist(&self) {
+    pub fn persist(&mut self) {
+        self.config.sync_island_size();
         self.config.save(&self.data_dir);
         self.registry.save(&self.data_dir);
     }

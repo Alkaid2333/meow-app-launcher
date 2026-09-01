@@ -5,12 +5,13 @@
 //!
 //! 状态机: 常驻(隐藏) → 收到 `settings_visible` 标志 → 显示并渲染 → 红点关闭喵。
 
+use crate::animation::{DurationBounce, IslandTransition};
 use crate::app::config::{AppConfig, SearchMode, ThemeMode};
 use crate::app::{Command, SharedState};
 use crate::platform::{Platform, PlatformWindow, WindowEvent, WindowHandler};
 use crate::render::font::FontCache;
 use crate::render::settings::{
-    paint_settings, RowHit, SETTINGS_HEIGHT, SETTINGS_WIDTH, SettingsGroup, SettingsLayout,
+    paint_settings, RowHit, RowId, SETTINGS_HEIGHT, SETTINGS_WIDTH, SettingsGroup, SettingsLayout,
     SettingsPage, SettingsRow,
 };
 use crate::render::{Renderer, SettingsTheme};
@@ -209,10 +210,10 @@ impl SettingsWindow {
             RowHit::TrafficLight(0) => self.hide(),
             RowHit::TrafficLight(1) => self.platform.minimize_window(&self.window),
             RowHit::TrafficLight(_) => {}
-            RowHit::Switch(i) => self.toggle_switch(i),
-            RowHit::StepperDec(i) => self.adjust_stepper(i, -1),
-            RowHit::StepperInc(i) => self.adjust_stepper(i, 1),
-            RowHit::Button(i) => self.press_button(i),
+            RowHit::Switch(id) => self.toggle_switch(id),
+            RowHit::StepperDec(id) => self.adjust_stepper(id, -1),
+            RowHit::StepperInc(id) => self.adjust_stepper(id, 1),
+            RowHit::Button(id) => self.press_button(id),
             RowHit::AppPick(i) => self.pick_app(i),
             RowHit::FavStar(i) => self.toggle_fav(i),
             RowHit::Chip(i) => self.remove_chip(i),
@@ -222,37 +223,86 @@ impl SettingsWindow {
     }
 
     /// 切换开关喵
-    fn toggle_switch(&mut self, index: usize) {
+    fn toggle_switch(&mut self, id: RowId) {
         let mut state = self.state.borrow_mut();
-        match (self.current_page, index) {
-            // 一般页喵
-            (0, 0) => {
+        match id {
+            RowId::DarkMode => {
                 state.config.theme.mode = if state.config.theme.mode == ThemeMode::Dark {
                     ThemeMode::Light
                 } else {
                     ThemeMode::Dark
                 };
             }
-            (0, 5) => state.config.window.always_on_top = !state.config.window.always_on_top,
-            (0, 6) => state.config.hotkey.enabled = !state.config.hotkey.enabled,
-            (1, 0) => state.config.window.show_recent = !state.config.window.show_recent,
-            (1, 1) => state.config.window.show_favorites = !state.config.window.show_favorites,
-            (1, 2) => state.config.window.show_frequent = !state.config.window.show_frequent,
-            (1, 3) => state.config.window.show_all = !state.config.window.show_all,
+            RowId::AlwaysOnTop => state.config.window.always_on_top = !state.config.window.always_on_top,
+            RowId::HotkeyEnabled => state.config.hotkey.enabled = !state.config.hotkey.enabled,
+            RowId::ShowRecent => state.config.window.show_recent = !state.config.window.show_recent,
+            RowId::ShowFavorites => {
+                state.config.window.show_favorites = !state.config.window.show_favorites
+            }
+            RowId::ShowFrequent => state.config.window.show_frequent = !state.config.window.show_frequent,
+            RowId::ShowAll => state.config.window.show_all = !state.config.window.show_all,
+            RowId::AutoMorph => state.config.island.auto_morph = !state.config.island.auto_morph,
+            RowId::Draggable => state.config.island.draggable = !state.config.island.draggable,
+            RowId::ReduceMotion => {
+                state.config.island.reduce_motion = !state.config.island.reduce_motion
+            }
             _ => {}
         }
         state.persist();
+        log::debug!("开关 {id:?} 已热写配置喵");
     }
 
     /// 步进调节喵
-    fn adjust_stepper(&mut self, index: usize, delta: i32) {
-        // 从页面模型读取步进范围喵
-        let (min, max) = self.stepper_range(index);
+    fn adjust_stepper(&mut self, id: RowId, delta: i32) {
+        let (min, max) = self.stepper_range(id);
         let mut state = self.state.borrow_mut();
-        let changed = match (self.current_page, index) {
-            (0, 2) => step_value(&mut state.config.window.width, delta, min, max),
-            (0, 3) => step_value(&mut state.config.window.height, delta, min, max),
-            (0, 4) => step_value(&mut state.config.window.icon_size, delta, min, max),
+        let island = &mut state.config.island;
+        let changed = match id {
+            RowId::IslandW => step_f64(&mut island.width, delta, min, max),
+            RowId::IslandH => step_f64(&mut island.height, delta, min, max),
+            RowId::IslandX => step_f64(&mut island.x, delta, min, max),
+            RowId::IslandY => step_f64(&mut island.y, delta, min, max),
+            RowId::ExpandedW => {
+                let ok = step_f64(&mut island.expanded_width, delta, min, max);
+                state.config.window.width = island.expanded_width;
+                ok
+            }
+            RowId::ExpandedH => {
+                let ok = step_f64(&mut island.expanded_height, delta, min, max);
+                state.config.window.height = island.expanded_height;
+                ok
+            }
+            RowId::ExpandedR => step_f64(&mut island.expanded_radius, delta, min, max),
+            RowId::InputRatio => {
+                let mut v = (island.input_ratio * 100.0).round();
+                let ok = step_f64(&mut v, delta, min, max);
+                island.input_ratio = v / 100.0;
+                ok
+            }
+            RowId::Margin => step_f64(&mut island.margin, delta, min, max),
+            RowId::Squash => {
+                let mut v = (island.summon_squash * 100.0).round();
+                let ok = step_f64(&mut v, delta, min, max);
+                island.summon_squash = v / 100.0;
+                ok
+            }
+            RowId::IconSize => step_value(&mut state.config.window.icon_size, delta, min, max),
+            RowId::SpringDuration(i) => {
+                let t = spring_at(i);
+                let tune = island.springs.get_mut(t);
+                let mut v = (tune.duration * 100.0).round();
+                let ok = step_f64(&mut v, delta, min, max);
+                tune.duration = v / 100.0;
+                ok
+            }
+            RowId::SpringBounce(i) => {
+                let t = spring_at(i);
+                let tune = island.springs.get_mut(t);
+                let mut v = (tune.bounce * 100.0).round();
+                let ok = step_f64(&mut v, delta, min, max);
+                tune.bounce = (v / 100.0).clamp(0.0, 0.95);
+                ok
+            }
             _ => false,
         };
         if changed {
@@ -260,34 +310,52 @@ impl SettingsWindow {
         }
     }
 
-    /// 读取指定行步进控件的 (min, max) 范围喵
-    fn stepper_range(&self, index: usize) -> (f32, f32) {
+    fn stepper_range(&self, id: RowId) -> (f32, f32) {
         let Some(page) = self.pages.get(self.current_page) else {
             return (0.0, 0.0);
         };
-        let mut idx = 0;
         for group in &page.groups {
             for row in &group.rows {
-                if idx == index
-                    && let SettingsRow::Stepper { min, max, .. } = row {
-                        return (*min as f32, *max as f32);
-                    }
-                idx += 1;
+                if let SettingsRow::Stepper {
+                    id: rid, min, max, ..
+                } = row
+                    && *rid == id
+                {
+                    return (*min as f32, *max as f32);
+                }
             }
         }
         (0.0, 0.0)
     }
 
     /// 按钮动作喵
-    fn press_button(&mut self, index: usize) {
-        match (self.current_page, index) {
-            (0, 1) => {
+    fn press_button(&mut self, id: RowId) {
+        match id {
+            RowId::Backdrop => {
                 let mut state = self.state.borrow_mut();
                 state.config.theme.backdrop = state.config.theme.backdrop.cycle();
                 state.persist();
                 log::info!("浮窗材质 → {} 喵", state.config.theme.backdrop.label());
             }
-            (1, 4) => {
+            RowId::Visual => {
+                let mut state = self.state.borrow_mut();
+                state.config.island.visual = state.config.island.visual.cycle();
+                state.persist();
+                log::info!("岛视觉 → {} 喵", state.config.island.visual.label());
+            }
+            RowId::MotionMode => {
+                let mut state = self.state.borrow_mut();
+                state.config.island.motion_mode = state.config.island.motion_mode.cycle();
+                state.persist();
+                log::info!("运动模式 → {} 喵", state.config.island.motion_mode.label());
+            }
+            RowId::Easing => {
+                let mut state = self.state.borrow_mut();
+                state.config.island.easing = state.config.island.easing.cycle();
+                state.persist();
+                log::info!("缓动 → {} 喵", state.config.island.easing.label());
+            }
+            RowId::SearchMode => {
                 let mut state = self.state.borrow_mut();
                 state.config.search.default_mode = match state.config.search.default_mode {
                     SearchMode::Name => SearchMode::Tag,
@@ -296,11 +364,11 @@ impl SettingsWindow {
                 };
                 state.persist();
             }
-            (2, 0) => {
+            RowId::Rescan => {
                 self.commands.borrow_mut().push_back(Command::Rescan);
                 log::info!("已请求重新扫描应用喵~");
             }
-            (2, 1) => {
+            RowId::RemoveApp => {
                 if let Some(name) = self.selected_app.clone() {
                     self.state.borrow_mut().remove_app(&name);
                     self.selected_app = None;
@@ -439,6 +507,7 @@ impl WindowHandler for SettingsWindow {
             WindowEvent::KeyDown(key) => self.on_key(key),
             WindowEvent::ImePreedit(_) => {}
             WindowEvent::FilesDropped(paths) => self.drop_files(paths),
+            WindowEvent::MouseMove(_, _) | WindowEvent::MouseUp => {}
             WindowEvent::MouseWheel(delta) => {
                 if self.visible {
                     // 滚轮滚动内容区,钳制到有效范围喵(每格滚动一行)喵
@@ -471,6 +540,52 @@ fn step_value(value: &mut f32, delta: i32, min: f32, max: f32) -> bool {
     true
 }
 
+fn step_f64(value: &mut f64, delta: i32, min: f32, max: f32) -> bool {
+    let new_value = (*value + delta as f64).clamp(min as f64, max as f64);
+    if (new_value - *value).abs() < f64::EPSILON {
+        return false;
+    }
+    *value = new_value;
+    true
+}
+
+fn spring_at(i: u8) -> IslandTransition {
+    match i {
+        0 => IslandTransition::Summon,
+        1 => IslandTransition::Dismiss,
+        2 => IslandTransition::Expand,
+        3 => IslandTransition::Collapse,
+        4 => IslandTransition::SummonExpanded,
+        _ => IslandTransition::DismissExpanded,
+    }
+}
+
+fn spring_label(i: u8) -> &'static str {
+    spring_at(i).label()
+}
+
+fn sw(id: RowId, label: &str, value: bool) -> SettingsRow {
+    SettingsRow::Switch {
+        id,
+        label: label.into(),
+        value,
+    }
+}
+
+fn st(id: RowId, label: &str, value: i32, min: i32, max: i32) -> SettingsRow {
+    SettingsRow::Stepper {
+        id,
+        label: label.into(),
+        value,
+        min,
+        max,
+    }
+}
+
+fn btn(id: RowId, label: String) -> SettingsRow {
+    SettingsRow::Button { id, label }
+}
+
 /// 从配置构建页面模型喵
 fn build_pages(
     config: &AppConfig,
@@ -479,12 +594,8 @@ fn build_pages(
     tag_draft: &str,
 ) -> Vec<SettingsPage> {
     let mut app_rows: Vec<SettingsRow> = vec![
-        SettingsRow::Button {
-            label: "重新扫描应用".into(),
-        },
-        SettingsRow::Button {
-            label: "删除选中应用".into(),
-        },
+        btn(RowId::Rescan, "重新扫描应用".into()),
+        btn(RowId::RemoveApp, "删除选中应用".into()),
         SettingsRow::Label {
             label: "已注册".into(),
             value: format!("{} 个 · 拖入 .lnk/.exe 即可注册喵", apps.len()),
@@ -504,6 +615,7 @@ fn build_pages(
     }
 
     let mut tag_rows = vec![SettingsRow::Input {
+        id: RowId::TagInput,
         label: "给选中应用加 Tag".into(),
         value: tag_draft.into(),
     }];
@@ -515,96 +627,156 @@ fn build_pages(
         }
     }
 
+    let island = &config.island;
+    let mut spring_rows = Vec::new();
+    for i in 0..6u8 {
+        let t = spring_at(i);
+        let tune: DurationBounce = island.springs.get(t);
+        spring_rows.push(st(
+            RowId::SpringDuration(i),
+            &format!("{} 时长 ms", spring_label(i)),
+            (tune.duration * 100.0).round() as i32,
+            5,
+            200,
+        ));
+        spring_rows.push(st(
+            RowId::SpringBounce(i),
+            &format!("{} 弹性 %", spring_label(i)),
+            (tune.bounce * 100.0).round() as i32,
+            0,
+            95,
+        ));
+    }
+
     vec![
         SettingsPage {
-            title: "一般".into(),
+            title: "巢穴".into(),
             groups: vec![
                 SettingsGroup {
                     title: "外观".into(),
                     rows: vec![
-                        SettingsRow::Switch {
-                            label: "深色模式".into(),
-                            value: config.theme.mode == ThemeMode::Dark,
-                        },
-                        SettingsRow::Button {
-                            label: format!("浮窗材质: {}", config.theme.backdrop.label()),
-                        },
-                    ],
-                },
-                SettingsGroup {
-                    title: "窗口".into(),
-                    rows: vec![
-                        SettingsRow::Stepper {
-                            label: "窗口宽度".into(),
-                            value: config.window.width as i32,
-                            min: 320,
-                            max: 1200,
-                        },
-                        SettingsRow::Stepper {
-                            label: "窗口高度".into(),
-                            value: config.window.height as i32,
-                            min: 200,
-                            max: 900,
-                        },
-                        SettingsRow::Stepper {
-                            label: "图标大小".into(),
-                            value: config.window.icon_size as i32,
-                            min: 24,
-                            max: 64,
-                        },
-                        SettingsRow::Switch {
-                            label: "始终置顶".into(),
-                            value: config.window.always_on_top,
-                        },
+                        sw(RowId::DarkMode, "墨夜模式", config.theme.mode == ThemeMode::Dark),
+                        btn(
+                            RowId::Backdrop,
+                            format!("浮窗材质 · {}", config.theme.backdrop.label()),
+                        ),
+                        btn(
+                            RowId::Visual,
+                            format!("岛皮肤 · {}", island.visual.label()),
+                        ),
                     ],
                 },
                 SettingsGroup {
                     title: "热键".into(),
                     rows: vec![
-                        SettingsRow::Switch {
-                            label: "启用全局热键".into(),
-                            value: config.hotkey.enabled,
-                        },
+                        sw(RowId::HotkeyEnabled, "启用全局热键", config.hotkey.enabled),
                         SettingsRow::Label {
                             label: "热键组合".into(),
                             value: format!("{}+{}", config.hotkey.modifiers, config.hotkey.key),
                         },
                     ],
                 },
+                SettingsGroup {
+                    title: "显示".into(),
+                    rows: vec![
+                        sw(RowId::ShowRecent, "显示最近打开", config.window.show_recent),
+                        sw(RowId::ShowFavorites, "显示收藏", config.window.show_favorites),
+                        sw(RowId::ShowFrequent, "显示最常用", config.window.show_frequent),
+                        sw(RowId::ShowAll, "始终显示全部", config.window.show_all),
+                        sw(RowId::AlwaysOnTop, "始终置顶", config.window.always_on_top),
+                        st(
+                            RowId::IconSize,
+                            "图标大小",
+                            config.window.icon_size as i32,
+                            24,
+                            64,
+                        ),
+                        btn(
+                            RowId::SearchMode,
+                            format!(
+                                "默认模式 · {}",
+                                match config.search.default_mode {
+                                    SearchMode::Name => "名称",
+                                    SearchMode::Tag => "标签 t:",
+                                    SearchMode::Initial => "首字母 i:",
+                                }
+                            ),
+                        ),
+                    ],
+                },
             ],
         },
         SettingsPage {
-            title: "搜索".into(),
-            groups: vec![SettingsGroup {
-                title: "显示".into(),
-                rows: vec![
-                    SettingsRow::Switch {
-                        label: "显示最近打开".into(),
-                        value: config.window.show_recent,
-                    },
-                    SettingsRow::Switch {
-                        label: "显示收藏".into(),
-                        value: config.window.show_favorites,
-                    },
-                    SettingsRow::Switch {
-                        label: "显示最常用".into(),
-                        value: config.window.show_frequent,
-                    },
-                    SettingsRow::Switch {
-                        label: "始终显示全部".into(),
-                        value: config.window.show_all,
-                    },
-                    SettingsRow::Button {
-                        label: format!(
-                            "默认模式: {}",
-                            match config.search.default_mode {
-                                SearchMode::Name => "名称",
-                                SearchMode::Tag => "标签 t:",
-                                SearchMode::Initial => "首字母 i:",
-                            }
+            title: "灵动岛".into(),
+            groups: vec![
+                SettingsGroup {
+                    title: "几何".into(),
+                    rows: vec![
+                        st(RowId::IslandW, "胶囊宽", island.width as i32, 160, 640),
+                        st(RowId::IslandH, "胶囊高", island.height as i32, 32, 80),
+                        st(RowId::IslandX, "水平锚点 %", island.x as i32, 2, 98),
+                        st(RowId::IslandY, "垂直锚点 %", island.y as i32, 2, 98),
+                        st(
+                            RowId::ExpandedW,
+                            "展开宽",
+                            island.expanded_width as i32,
+                            280,
+                            900,
                         ),
-                    },
-                ],
+                        st(
+                            RowId::ExpandedH,
+                            "展开高",
+                            island.expanded_height as i32,
+                            160,
+                            720,
+                        ),
+                        st(
+                            RowId::ExpandedR,
+                            "展开圆角",
+                            island.expanded_radius as i32,
+                            8,
+                            48,
+                        ),
+                        st(
+                            RowId::InputRatio,
+                            "输入槽占比 %",
+                            (island.input_ratio * 100.0) as i32,
+                            20,
+                            100,
+                        ),
+                        st(RowId::Margin, "安全边距", island.margin as i32, 0, 80),
+                        st(
+                            RowId::Squash,
+                            "收起压扁 %",
+                            (island.summon_squash * 100.0) as i32,
+                            5,
+                            100,
+                        ),
+                    ],
+                },
+                SettingsGroup {
+                    title: "行为".into(),
+                    rows: vec![
+                        sw(RowId::AutoMorph, "输入自动展开", island.auto_morph),
+                        sw(RowId::Draggable, "允许拖拽定位", island.draggable),
+                        sw(RowId::ReduceMotion, "减少动效", island.reduce_motion),
+                        btn(
+                            RowId::MotionMode,
+                            format!("运动引擎 · {}", island.motion_mode.label()),
+                        ),
+                        btn(
+                            RowId::Easing,
+                            format!("缓动曲线 · {}", island.easing.label()),
+                        ),
+                    ],
+                },
+            ],
+        },
+        SettingsPage {
+            title: "弹簧".into(),
+            groups: vec![SettingsGroup {
+                title: "六段过渡 (时长×10ms / 弹性%)".into(),
+                rows: spring_rows,
             }],
         },
         SettingsPage {
@@ -633,6 +805,10 @@ fn build_pages(
                         label: "项目".into(),
                         value: "meow-app-launcher".into(),
                     },
+        SettingsRow::Label {
+            label: "岛内核".into(),
+            value: "spring + FSM + 边界回弹".into(),
+        },
                 ],
             }],
         },

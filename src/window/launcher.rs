@@ -11,12 +11,12 @@
 //! * 隐藏(hide): 失焦/Esc/启动后 → 清空 → 隐藏窗口喵
 //! * 展开: 有结果时面板弹簧展开,无结果时折叠喵
 
-use crate::animation::{LauncherSprings, params};
+use crate::animation::{clamp_dt, DynamicIsland};
 use crate::app::{Command, ListItem, SharedState};
 use crate::apps::AppInfo;
 use crate::apps::icon::IconExtractor;
 use crate::platform::{Key, Platform, PlatformWindow, WindowEvent, WindowHandler};
-use crate::render::{FontCache, Layout, Renderer, Theme, layout, paint_scene};
+use crate::render::{layout, FontCache, Layout, Renderer, Theme, paint_scene};
 use skia_safe::Image;
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
@@ -33,8 +33,8 @@ const CARET_INTERVAL_MS: u32 = 500;
 const HEARTBEAT_MS: u32 = 100;
 /// 光标闪烁半周期喵
 const CARET_HALF_PERIOD: Duration = Duration::from_millis(500);
-/// 呼出时的屏幕垂直位置比例(距顶部)喵
-const TOP_RATIO: f32 = 0.18;
+/// 拖拽启动阈值(物理 px)喵
+const DRAG_SLOP: f32 = 4.0;
 
 /// 后台任务结果喵(异步任务完成后回传主线程)喵
 enum BgEvent {
@@ -58,8 +58,8 @@ pub struct Launcher {
     renderer: Renderer,
     /// 字体缓存喵
     fonts: FontCache,
-    /// 弹簧动画喵
-    springs: LauncherSprings,
+    /// 灵动岛内核喵
+    island: DynamicIsland,
     /// 是否呼出喵
     visible: bool,
     /// 光标是否可见(闪烁)喵
@@ -86,6 +86,21 @@ pub struct Launcher {
     commands: Rc<RefCell<VecDeque<Command>>>,
     /// IME 预编辑串喵
     ime_preedit: String,
+    /// 拖拽起点喵
+    drag: Option<DragState>,
+    /// 刚拖完,吞掉下一次 click 喵
+    just_dragged: bool,
+}
+
+/// 拖拽快照喵
+struct DragState {
+    origin_x: f64,
+    origin_y: f64,
+    client_x: f32,
+    client_y: f32,
+    stage_w: f64,
+    stage_h: f64,
+    active: bool,
 }
 
 impl Launcher {
@@ -99,14 +114,18 @@ impl Launcher {
         commands: Rc<RefCell<VecDeque<Command>>>,
         settings_window: PlatformWindow,
     ) -> PlatformWindow {
-        // 计算初始窗口尺寸与位置(屏幕顶部居中)喵
+        // 计算初始窗口尺寸与位置(按岛配置百分比锚点)喵
         let scale = platform.scale_factor();
-        let layout = Layout::compute(&state.borrow().config, scale, 0, 0.0, 0.0);
         let (screen_w, screen_h) = platform.screen_size();
-        let win_w = layout.window_width.ceil() as i32;
-        let win_h = layout.window_height.ceil() as i32;
-        let x = (screen_w - win_w) / 2;
-        let y = (screen_h as f32 * TOP_RATIO) as i32;
+        let island_cfg = state.borrow().config.island.clone();
+        let mut island = DynamicIsland::new(island_cfg);
+        island.set_stage(screen_w as f64 / scale as f64, screen_h as f64 / scale as f64);
+        let frame = island.frame();
+        let layout = Layout::from_frame(&state.borrow().config, scale, &frame, 0, 0.0);
+        let win_w = layout.window_width.ceil().max(1.0) as i32;
+        let win_h = layout.window_height.ceil().max(1.0) as i32;
+        let x = (frame.left as f32 * scale - layout::SHADOW_MARGIN * scale).round() as i32;
+        let y = (frame.top as f32 * scale - layout::SHADOW_MARGIN * scale).round() as i32;
 
         let spec = crate::platform::WindowSpec {
             x,
@@ -139,7 +158,7 @@ impl Launcher {
             settings_window,
             renderer,
             fonts: FontCache::new(),
-            springs: LauncherSprings::new(),
+            island,
             visible: false,
             caret_on: true,
             caret_acc: Duration::ZERO,
@@ -153,6 +172,8 @@ impl Launcher {
             pending_icons: HashSet::new(),
             commands,
             ime_preedit: String::new(),
+            drag: None,
+            just_dragged: false,
         };
 
         // 首次启动后台异步扫描系统应用喵(不阻塞窗口创建)喵
@@ -186,6 +207,8 @@ impl Launcher {
             state.launcher_visible = true;
         }
         self.ime_preedit.clear();
+        self.sync_island_from_config(false);
+        self.island.go(true, self.want_expanded());
         self.platform.show_window(&self.window, true);
         self.platform.focus_window(&self.window);
         self.start_animation();
@@ -202,9 +225,9 @@ impl Launcher {
             state.reset_search();
             state.launcher_visible = false;
         }
-        self.springs.snap(false, false);
-        self.platform.show_window(&self.window, false);
-        self.platform.set_timer(&self.window, HEARTBEAT_MS);
+        self.island.go(false, false);
+        self.start_animation();
+        self.request_render();
     }
 
     /// 切换呼出/隐藏喵
@@ -233,7 +256,15 @@ impl Launcher {
     fn on_key(&mut self, key: Key) {
         match key {
             Key::Enter => self.launch_selected(),
-            Key::Escape => self.hide(),
+            Key::Escape => {
+                if self.island.state == crate::animation::IslandState::Expanded {
+                    self.island.go(true, false);
+                    self.start_animation();
+                    self.request_render();
+                } else {
+                    self.hide();
+                }
+            }
             Key::Backspace => {
                 self.state.borrow_mut().query.pop();
                 self.refresh_results();
@@ -250,19 +281,14 @@ impl Launcher {
         self.request_render();
     }
 
-    /// 鼠标按下(点击条目启动)喵
+    /// 鼠标按下(点击条目启动 / 开始拖岛)喵
     fn on_mouse_down(&mut self, x: f32, y: f32) {
+        if self.just_dragged {
+            self.just_dragged = false;
+            return;
+        }
         let scale = self.platform.scale_factor();
-        let layout = {
-            let state = self.state.borrow();
-            Layout::compute(
-                &state.config,
-                scale,
-                state.results.len(),
-                self.springs.panel.value,
-                self.scroll_offset,
-            )
-        };
+        let layout = self.current_layout(scale);
         for (i, rect) in layout.item_rects.iter().enumerate() {
             if rect.left <= x && x <= rect.right && rect.top <= y && y <= rect.bottom {
                 if matches!(self.state.borrow().results.get(i), Some(ListItem::Section(_))) {
@@ -272,6 +298,53 @@ impl Launcher {
                 self.launch_selected();
                 return;
             }
+        }
+        if self.state.borrow().config.island.draggable {
+            let (sw, sh) = self.platform.screen_size();
+            let cfg = &self.state.borrow().config.island;
+            self.drag = Some(DragState {
+                origin_x: cfg.x,
+                origin_y: cfg.y,
+                client_x: x,
+                client_y: y,
+                stage_w: sw as f64 / scale as f64,
+                stage_h: sh as f64 / scale as f64,
+                active: false,
+            });
+        }
+    }
+
+    fn on_mouse_move(&mut self, x: f32, y: f32) {
+        let Some(drag) = self.drag.as_mut() else {
+            return;
+        };
+        let dx = x - drag.client_x;
+        let dy = y - drag.client_y;
+        if !drag.active && dx.abs() < DRAG_SLOP && dy.abs() < DRAG_SLOP {
+            return;
+        }
+        drag.active = true;
+        let scale = self.platform.scale_factor().max(0.01);
+        let nx = (drag.origin_x + (dx / scale) as f64 / drag.stage_w * 100.0).clamp(2.0, 98.0);
+        let ny = (drag.origin_y + (dy / scale) as f64 / drag.stage_h * 100.0).clamp(2.0, 98.0);
+        let mut cfg = self.state.borrow().config.island.clone();
+        cfg.x = nx;
+        cfg.y = ny;
+        self.island.set_config(cfg.clone(), false);
+        {
+            let mut state = self.state.borrow_mut();
+            state.config.island = cfg;
+        }
+        self.request_render();
+    }
+
+    fn on_mouse_up(&mut self) {
+        if let Some(drag) = self.drag.take()
+            && drag.active
+        {
+            self.just_dragged = true;
+            self.state.borrow_mut().persist();
+            log::info!("灵动岛位置已保存: ({:.1}%, {:.1}%) 喵", self.island.config.x, self.island.config.y);
         }
     }
 
@@ -283,6 +356,9 @@ impl Launcher {
         log::debug!("查询更新: {:?}, 结果 {count} 条喵", self.state.borrow().query);
         // 为缺图标的条目发起异步提取喵
         self.request_missing_icons();
+        if self.state.borrow().config.island.auto_morph {
+            self.island.go(true, self.want_expanded());
+        }
         self.start_animation();
         self.request_render();
     }
@@ -305,7 +381,7 @@ impl Launcher {
             (
                 state.results.len(),
                 state.selected as f32,
-                state.config.window.height.max(80.0),
+                state.config.window.height.max(80.0) as f32,
             )
         };
         if len == 0 {
@@ -313,19 +389,17 @@ impl Launcher {
             return;
         }
 
-        let content_h = len as f32 * layout::ITEM_HEIGHT + layout::PANEL_PADDING * 2.0;
+        let content_h = len as f32 * layout::ITEM_HEIGHT;
         let panel_h = content_h.min(max_h);
 
-        let item_top = layout::PANEL_PADDING + selected * layout::ITEM_HEIGHT;
+        let item_top = selected * layout::ITEM_HEIGHT;
         let item_bottom = item_top + layout::ITEM_HEIGHT;
-        let view_bottom = self.scroll_offset + (panel_h - layout::PANEL_PADDING);
+        let view_bottom = self.scroll_offset + panel_h;
 
-        if item_top < self.scroll_offset + layout::PANEL_PADDING {
-            // 向上滚: 条目顶部对齐可视区上缘喵
-            self.scroll_offset = item_top - layout::PANEL_PADDING;
+        if item_top < self.scroll_offset {
+            self.scroll_offset = item_top;
         } else if item_bottom > view_bottom {
-            // 向下滚: 条目底部对齐可视区下缘喵
-            self.scroll_offset = item_bottom - (panel_h - layout::PANEL_PADDING);
+            self.scroll_offset = item_bottom - panel_h;
         }
 
         let max_scroll = (content_h - panel_h).max(0.0);
@@ -457,66 +531,119 @@ impl Launcher {
         let elapsed = self.last_tick.map(|t| now - t).unwrap_or(Duration::ZERO);
         self.last_tick = Some(now);
 
-        // 处理后台任务结果与应用命令(隐藏时也要跑,否则托盘点了没反应)喵
         self.drain_bg_events();
         self.drain_commands();
+        self.sync_island_from_config(true);
 
-        if !self.visible {
+        let hidden_done = !self.visible && self.island.settled();
+        if hidden_done {
+            self.platform.show_window(&self.window, false);
             self.platform.set_timer(&self.window, HEARTBEAT_MS);
             return;
         }
 
-        // 光标闪烁(半周期)喵
-        self.caret_acc += elapsed;
-        if self.caret_acc >= CARET_HALF_PERIOD {
-            self.caret_acc = Duration::ZERO;
-            self.caret_on = !self.caret_on;
+        if self.visible {
+            self.caret_acc += elapsed;
+            if self.caret_acc >= CARET_HALF_PERIOD {
+                self.caret_acc = Duration::ZERO;
+                self.caret_on = !self.caret_on;
+            }
+            self.island.go(true, self.want_expanded());
         }
 
-        // 推进弹簧喵
-        let animating = self.springs.tick(
-            params::normalize_dt(elapsed.as_secs_f32()),
-            self.visible,
-            self.state.borrow().results_visible,
-        );
+        let (sw, sh) = self.platform.screen_size();
+        let scale = self.platform.scale_factor().max(0.01);
+        self.island
+            .set_stage(sw as f64 / scale as f64, sh as f64 / scale as f64);
+        let animating = {
+            self.island.step(clamp_dt(elapsed.as_secs_f32()) as f64);
+            !self.island.settled()
+        };
 
         self.request_render();
 
-        let interval = if animating { ANIM_INTERVAL_MS } else { CARET_INTERVAL_MS };
+        let interval = if animating || self.visible {
+            if animating {
+                ANIM_INTERVAL_MS
+            } else {
+                CARET_INTERVAL_MS
+            }
+        } else {
+            HEARTBEAT_MS
+        };
         self.platform.set_timer(&self.window, interval);
+    }
+
+    fn want_expanded(&self) -> bool {
+        let state = self.state.borrow();
+        state.results_visible && !state.results.is_empty()
+    }
+
+    fn sync_island_from_config(&mut self, animate: bool) {
+        let cfg = self.state.borrow().config.island.clone();
+        if cfg != self.island.config {
+            log::debug!("灵动岛配置热更新喵");
+            self.island.set_config(cfg, animate);
+            self.start_animation();
+        }
+    }
+
+    fn current_layout(&mut self, scale: f32) -> Layout {
+        let (sw, sh) = self.platform.screen_size();
+        self.island.set_stage(
+            sw as f64 / scale.max(0.01) as f64,
+            sh as f64 / scale.max(0.01) as f64,
+        );
+        let frame = self.island.frame();
+        let state = self.state.borrow();
+        Layout::from_frame(
+            &state.config,
+            scale,
+            &frame,
+            state.results.len(),
+            self.scroll_offset,
+        )
     }
 
     /// 渲染一帧并呈现喵
     fn request_render(&mut self) {
-        let scale = self.platform.scale_factor();
-
-        // 计算布局(读 config + results)喵
+        let scale = self.platform.scale_factor().max(0.01);
+        let (sw, sh) = self.platform.screen_size();
+        self.island
+            .set_stage(sw as f64 / scale as f64, sh as f64 / scale as f64);
+        let frame = self.island.frame();
         let layout = {
             let state = self.state.borrow();
-            Layout::compute(
+            Layout::from_frame(
                 &state.config,
                 scale,
+                &frame,
                 state.results.len(),
-                self.springs.panel.value,
                 self.scroll_offset,
             )
         };
 
-        // 窗口尺寸随内容(面板展开)变化喵
-        let w = layout.window_width.ceil() as i32;
-        let h = layout.window_height.ceil() as i32;
+        let w = layout.window_width.ceil().max(1.0) as i32;
+        let h = layout.window_height.ceil().max(1.0) as i32;
         if w != self.renderer.width() || h != self.renderer.height() {
             self.renderer.resize(w, h);
             self.platform.resize_window(&self.window, w, h);
         }
+        let win_x = (frame.left as f32 * scale - layout::SHADOW_MARGIN * scale).round() as i32;
+        let win_y = (frame.top as f32 * scale - layout::SHADOW_MARGIN * scale).round() as i32;
+        self.platform.move_window(&self.window, win_x, win_y);
 
-        // 绘制场景喵
         let theme = {
             let state = self.state.borrow();
-            Theme::for_mode(state.config.theme.mode, state.config.theme.backdrop)
+            Theme::resolve(
+                state.config.theme.mode,
+                state.config.theme.backdrop,
+                state.config.island.visual,
+            )
         };
-        let alpha = self.springs.alpha.value;
-        let caret_on = self.caret_on && self.visible && (!self.state.borrow().query.is_empty() || !self.ime_preedit.is_empty());
+        let caret_on = self.caret_on
+            && self.visible
+            && (!self.state.borrow().query.is_empty() || !self.ime_preedit.is_empty());
         {
             let canvas = self.renderer.canvas();
             let mut state = self.state.borrow_mut();
@@ -526,13 +653,11 @@ impl Launcher {
                 &layout,
                 &mut state,
                 &self.fonts,
-                alpha,
                 caret_on,
                 &self.ime_preedit,
             );
         }
 
-        // 呈现喵
         self.renderer.read_bgra(&mut self.pixels);
         self.platform.present(&self.window, w, h, &self.pixels);
     }
@@ -546,6 +671,8 @@ impl WindowHandler for Launcher {
             WindowEvent::Char(ch) => self.on_char(ch),
             WindowEvent::ImePreedit(text) => self.on_ime_preedit(text),
             WindowEvent::MouseDown(x, y) => self.on_mouse_down(x, y),
+            WindowEvent::MouseMove(x, y) => self.on_mouse_move(x, y),
+            WindowEvent::MouseUp => self.on_mouse_up(),
             WindowEvent::MouseWheel(_) => {}
             WindowEvent::LostFocus => {
                 if self.visible {

@@ -234,7 +234,7 @@ impl Platform for Win32Platform {
 
     fn resize_window(&self, window: &PlatformWindow, width: i32, height: i32) {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            SetWindowPos, HWND_TOPMOST, SWP_NOMOVE,
+            SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOZORDER,
         };
         unsafe {
             SetWindowPos(
@@ -245,6 +245,24 @@ impl Platform for Win32Platform {
                 width,
                 height,
                 SWP_NOMOVE,
+            );
+        }
+        let _ = SWP_NOZORDER;
+    }
+
+    fn move_window(&self, window: &PlatformWindow, x: i32, y: i32) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, HWND_TOPMOST, SWP_NOSIZE,
+        };
+        unsafe {
+            SetWindowPos(
+                window.hwnd() as HWND,
+                HWND_TOPMOST,
+                x,
+                y,
+                0,
+                0,
+                SWP_NOSIZE,
             );
         }
     }
@@ -440,8 +458,8 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     use windows_sys::Win32::Graphics::Gdi::ValidateRect;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_BACK;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DefWindowProcW, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEWHEEL,
-        WM_NCDESTROY, WM_PAINT, WM_TIMER,
+        DefWindowProcW, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+        WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT, WM_TIMER,
     };
 
     match msg {
@@ -481,6 +499,15 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         WM_LBUTTONDOWN => {
             let (x, y) = unpack_lparam(lparam);
             with_window_handler(hwnd, |h| h.on_event(WindowEvent::MouseDown(x, y)));
+            0
+        }
+        WM_MOUSEMOVE => {
+            let (x, y) = unpack_lparam(lparam);
+            with_window_handler(hwnd, |h| h.on_event(WindowEvent::MouseMove(x, y)));
+            0
+        }
+        WM_LBUTTONUP => {
+            with_window_handler(hwnd, |h| h.on_event(WindowEvent::MouseUp));
             0
         }
         // 鼠标滚轮喵

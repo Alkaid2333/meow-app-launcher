@@ -102,6 +102,10 @@ pub enum WindowEvent {
     ImePreedit(String),
     /// 鼠标按下(客户区物理坐标)喵
     MouseDown(f32, f32),
+    /// 鼠标移动(客户区物理坐标)喵
+    MouseMove(f32, f32),
+    /// 鼠标松开喵
+    MouseUp,
     /// 鼠标滚轮(正=向上)喵
     MouseWheel(f32),
     /// 窗口失去激活(前台切走)喵
@@ -179,6 +183,9 @@ pub trait Platform: Send + Sync {
 
     /// 调整窗口尺寸(物理像素)喵
     fn resize_window(&self, window: &PlatformWindow, width: i32, height: i32);
+
+    /// 移动窗口到屏幕坐标(物理像素)喵
+    fn move_window(&self, window: &PlatformWindow, x: i32, y: i32);
 
     /// 用 BGRA 像素呈现窗口内容喵(每像素透明)喵
     fn present(&self, window: &PlatformWindow, width: i32, height: i32, bgra: &[u8]);

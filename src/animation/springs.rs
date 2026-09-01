@@ -1,74 +1,355 @@
-//! 弹簧物理内核喵~
+//! 弹簧引擎 —— 原项目 js/spring.js 的逐位等价实现喵
 //!
-//! 纯 Rust 数学库,零 GPUI 依赖、零平台依赖,可独立单测喵!
-//! 借鉴自 WinIsland 的 `utils/physics.rs`,原样移植并加了可爱注释喵。
-//!
-//! 心法: 所有动效的「数值层」都是纯函数——弹簧值、透明度、位移,
-//! 渲染层只负责把数值翻译成样式喵。动画永远可打断,因为每帧都
-//! 是根据当前状态重新计算,不存在不可逆的动画状态机喵!
+//! 公式与运算顺序刻意与 JS 版保持一致喵。用 f64：精度对齐更重要喵。
 
-/// 单个弹簧喵~
+use serde::{Deserialize, Serialize};
+use std::f64::consts::PI;
+
+/// 积分步长。调小更稳、调大更快但会飘
+pub const FIXED_DT: f64 = 1.0 / 240.0;
+/// 单帧最多补偿的时间，防止页面切后台回来一次性积分到天荒地老
+pub const MAX_FRAME: f64 = 1.0 / 15.0;
+/// bounce → 过冲量的换算：bounce=1 时过冲 55%，对 UI 是"很弹但不飞"
+pub const OVERSHOOT_SCALE: f64 = 0.55;
+/// ζ 的安全区间：太小会振荡到天荒地老，太大退化成临界阻尼
+pub const ZETA_MIN: f64 = 0.06;
+pub const ZETA_MAX: f64 = 0.995;
+/// bounce 的上限
+pub const BOUNCE_MAX: f64 = 0.95;
+
+/// 与 JS 语义一致的 clamp（NaN 时原样返回，不像 f64::clamp 那样 panic）
+#[inline]
+pub fn clamp(v: f64, min: f64, max: f64) -> f64 {
+    if v < min {
+        min
+    } else if v > max {
+        max
+    } else {
+        v
+    }
+}
+
+/// 给定期望的「稳定时间」，反推需要的 ωn 系数。
 ///
-/// 用「半隐式欧拉积分」模拟弹簧物理:
-/// 1. 先根据位移算力,更新速度
-/// 2. 再用新速度更新位置
+/// 推导：欠阻尼响应包络 ≈ e^(−ζωn·t) / √(1−ζ²)，令它在 `t = duration` 时衰减到 1%
+///   → ζωn·T = 4.6 − ½·ln(1−ζ²)
 ///
-/// 这样能产生自然的过冲回弹,就是 iOS 灵动岛那种质感喵!
-#[derive(Clone, Copy, Debug, Default)]
+/// 数值仿真验证：ζ ∈ [0.05, 0.9] 内误差 < 8%。
+pub fn omega_coef(zeta: f64) -> f64 {
+    let z = clamp(zeta, ZETA_MIN, ZETA_MAX);
+    (4.6 - 0.5 * (1.0 - z * z).ln()) / z
+}
+
+/// 过冲量 → 阻尼比 ζ（二阶系统经典关系 OS = e^(−πζ/√(1−ζ²)) 的反函数）
+pub fn zeta_from_overshoot(os: f64) -> f64 {
+    if os <= 1e-6 {
+        return 1.0;
+    }
+    let l = -os.ln();
+    clamp(l / (PI * PI + l * l).sqrt(), ZETA_MIN, 1.0)
+}
+
+/// 阻尼比 ζ → 过冲量
+pub fn overshoot_from_zeta(zeta: f64) -> f64 {
+    let z = clamp(zeta, ZETA_MIN, 0.999_999);
+    (-PI * z / (1.0 - z * z).sqrt()).exp()
+}
+
+/// 物理三件套
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpringParams {
+    pub stiffness: f64,
+    pub damping: f64,
+    pub mass: f64,
+}
+
+/// duration + bounce 三件套喵
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DurationBounce {
+    pub duration: f64,
+    pub bounce: f64,
+    #[serde(default = "one_mass")]
+    pub mass: f64,
+}
+
+fn one_mass() -> f64 {
+    1.0
+}
+
+impl SpringParams {
+    /// 从「时长 + 回弹」推导物理参数。bounce 语义 = 回弹强度，0 干脆、1 约过冲 55%
+    pub fn from_duration_bounce(duration: f64, bounce: f64, mass: f64) -> Self {
+        let m = if mass > 0.0 { mass } else { 1.0 };
+        let b = clamp(bounce, 0.0, BOUNCE_MAX);
+        let zeta = zeta_from_overshoot(b * OVERSHOOT_SCALE);
+        let omega = omega_coef(zeta) / duration.max(0.05);
+        let stiffness = omega * omega * m;
+        let damping = 2.0 * zeta * (stiffness * m).sqrt();
+        SpringParams { stiffness, damping, mass: m }
+    }
+
+    /// 上面那位的逆运算，来回换算误差 < 1e-12
+    pub fn to_duration_bounce(self) -> DurationBounce {
+        let m = if self.mass > 0.0 { self.mass } else { 1.0 };
+        let k = self.stiffness.max(1e-6);
+        let zeta = clamp(self.damping / (2.0 * (k * m).sqrt()), ZETA_MIN, ZETA_MAX);
+        let omega = (k / m).sqrt();
+        DurationBounce {
+            duration: clamp(omega_coef(zeta) / omega, 0.02, 20.0),
+            bounce: clamp(overshoot_from_zeta(zeta) / OVERSHOOT_SCALE, 0.0, BOUNCE_MAX),
+            mass: m,
+        }
+    }
+}
+
+/// 一维弹簧。保留速度，所以半路改目标不会抽搐。
+#[derive(Debug, Clone, Copy)]
 pub struct Spring {
-    /// 当前位置喵
-    pub value: f32,
-    /// 当前速度喵
-    pub velocity: f32,
+    pub value: f64,
+    pub target: f64,
+    pub velocity: f64,
+    pub stiffness: f64,
+    pub damping: f64,
+    pub mass: f64,
+    /// 静止判定：距离阈值。像素通道可以松（0.03），归一化通道要严（0.0015）
+    pub rest_delta: f64,
+    /// 静止判定：速度阈值
+    pub rest_speed: f64,
+    pub settled: bool,
+    acc: f64,
 }
 
 impl Spring {
-    /// 造一个新弹簧,停在指定位置,速度为零喵~
-    pub fn new(value: f32) -> Self {
-        Self {
+    /// 建一根弹簧。rest_delta / rest_speed 建议按通道量级给
+    pub fn new(value: f64, params: SpringParams, rest_delta: f64, rest_speed: f64) -> Self {
+        Spring {
             value,
+            target: value,
             velocity: 0.0,
+            stiffness: params.stiffness,
+            damping: params.damping,
+            mass: params.mass,
+            rest_delta,
+            rest_speed,
+            settled: true,
+            acc: 0.0,
         }
     }
 
-    /// 朝目标值运动一步喵~
-    ///
-    /// * `target` - 目标值
-    /// * `stiffness` - 刚度,越大越快到达
-    /// * `damping` - 阻尼,越小越「弹」(过冲多),接近 1.0 越粘滞
-    /// * `dt` - 归一化步长(60fps 基准,帧率无关)
-    pub fn update_dt(&mut self, target: f32, stiffness: f32, damping: f32, dt: f32) {
-        // 非法步长直接溜走,防止 NaN 传染喵
-        if !dt.is_finite() || dt <= 0.0 {
-            return;
-        }
-        // 力 = 位移 × 刚度 × dt(半隐式欧拉: 先速度后位置)
-        let force = (target - self.value) * stiffness * dt;
-        self.velocity = (self.velocity + force) * damping.powf(dt);
-        self.value += self.velocity * dt;
-        // 数值兜底: 出现任何非有限值,直接吸到目标上,别飘走喵!
-        if !self.value.is_finite() {
-            self.value = target;
-            self.velocity = 0.0;
-        }
-        if !self.velocity.is_finite() {
-            self.velocity = 0.0;
-        }
+    /// 换一套弹簧参数（改 duration/bounce 或 stiffness/damping 都行）
+    pub fn configure(&mut self, params: SpringParams) {
+        self.stiffness = params.stiffness;
+        self.damping = params.damping;
+        self.mass = params.mass;
     }
 
-    /// 打断动画: 直接取值并清零速度喵~
-    ///
-    /// 拖拽/点击接管时调用,这是「可打断动画」的标准动作喵!
-    pub fn snap(&mut self, value: f32) {
+    /// 设置目标值。已经在跑的弹簧会保留当前速度，衔接自然
+    pub fn set(&mut self, target: f64) {
+        self.target = target;
+        self.settled = false;
+        self.acc = 0.0;
+    }
+
+    /// 瞬间归位，清空速度
+    pub fn jump(&mut self, value: f64) {
         self.value = value;
+        self.target = value;
         self.velocity = 0.0;
+        self.settled = true;
+        self.acc = 0.0;
     }
 
-    /// 弹簧是否已经停稳了喵?
-    ///
-    /// 停稳标准: 速度绝对值 ≤ 0.001
-    pub fn is_still(&self) -> bool {
-        self.velocity.abs() <= 0.001
+    /// 推进 dt 秒，返回当前值
+    pub fn step(&mut self, dt: f64) -> f64 {
+        if self.settled {
+            return self.value;
+        }
+
+        self.acc += dt;
+        let mut guard = 0;
+        while self.acc >= FIXED_DT && guard < 900 {
+            self.acc -= FIXED_DT;
+            guard += 1;
+            let a = (-self.stiffness * (self.value - self.target)
+                - self.damping * self.velocity)
+                / self.mass;
+            self.velocity += a * FIXED_DT;
+            self.value += self.velocity * FIXED_DT;
+        }
+        if guard >= 900 {
+            self.acc = 0.0;
+        }
+
+        if self.velocity.abs() < self.rest_speed && (self.target - self.value).abs() < self.rest_delta
+        {
+            self.value = self.target;
+            self.velocity = 0.0;
+            self.settled = true;
+        }
+        self.value
+    }
+}
+
+// ───────────────────────── 缓动补间（与 Spring 接口一致，可互换） ─────────────────────────
+
+fn linear(t: f64) -> f64 {
+    t
+}
+fn ease_out_quad(t: f64) -> f64 {
+    1.0 - (1.0 - t) * (1.0 - t)
+}
+fn ease_out_quart(t: f64) -> f64 {
+    1.0 - (1.0 - t).powi(4)
+}
+fn ease_out_quint(t: f64) -> f64 {
+    1.0 - (1.0 - t).powi(5)
+}
+fn ease_out_expo(t: f64) -> f64 {
+    if t >= 1.0 {
+        1.0
+    } else {
+        1.0 - (-10.0 * t).exp2()
+    }
+}
+fn ease_in_out_cubic(t: f64) -> f64 {
+    if t < 0.5 {
+        4.0 * t * t * t
+    } else {
+        1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+    }
+}
+/// 带过冲的回弹，和 spring 的 bounce 是两种味道
+fn ease_out_back(t: f64) -> f64 {
+    let c1 = 1.70158;
+    let c3 = c1 + 1.0;
+    1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
+}
+
+/// 名字 → 缓动函数（与 js 端 EASINGS 的 key 一一对应）
+pub fn easing_fn(name: &str) -> fn(f64) -> f64 {
+    match name {
+        "linear" => linear,
+        "easeOutQuad" => ease_out_quad,
+        "easeOutQuart" => ease_out_quart,
+        "easeOutQuint" => ease_out_quint,
+        "easeOutExpo" => ease_out_expo,
+        "easeInOutCubic" => ease_in_out_cubic,
+        "easeOutBack" => ease_out_back,
+        _ => ease_out_quint,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Tween {
+    pub value: f64,
+    from: f64,
+    pub target: f64,
+    elapsed: f64,
+    pub duration: f64,
+    pub easing: &'static str,
+    pub settled: bool,
+}
+
+impl Tween {
+    pub fn new(value: f64, duration: f64, easing: &'static str) -> Self {
+        Tween { value, from: value, target: value, elapsed: 0.0, duration, easing, settled: true }
+    }
+
+    pub fn set(&mut self, target: f64) {
+        self.from = self.value;
+        self.target = target;
+        self.elapsed = 0.0;
+        self.settled = false;
+    }
+
+    pub fn jump(&mut self, value: f64) {
+        self.value = value;
+        self.from = value;
+        self.target = value;
+        self.elapsed = 0.0;
+        self.settled = true;
+    }
+
+    pub fn step(&mut self, dt: f64) -> f64 {
+        if self.settled {
+            return self.value;
+        }
+        self.elapsed += dt;
+        let d = self.duration.max(0.0);
+        let t = if d > 0.0 { self.elapsed / d } else { 1.0 };
+        if t >= 1.0 {
+            self.value = self.target;
+            self.settled = true;
+            return self.value;
+        }
+        let f = easing_fn(self.easing);
+        self.value = self.from + (self.target - self.from) * f(t);
+        self.value
+    }
+}
+
+/// 弹簧 / 缓动 的统一外壳 —— DynamicIsland 只跟它打交道
+#[derive(Debug, Clone, Copy)]
+pub enum Animator {
+    Spring(Spring),
+    Tween(Tween),
+}
+
+impl Animator {
+    pub fn new_spring(value: f64, params: SpringParams, rest_delta: f64, rest_speed: f64) -> Self {
+        Animator::Spring(Spring::new(value, params, rest_delta, rest_speed))
+    }
+    pub fn new_tween(value: f64, duration: f64, easing: &'static str) -> Self {
+        Animator::Tween(Tween::new(value, duration, easing))
+    }
+
+    pub fn value(&self) -> f64 {
+        match self {
+            Animator::Spring(s) => s.value,
+            Animator::Tween(t) => t.value,
+        }
+    }
+    pub fn settled(&self) -> bool {
+        match self {
+            Animator::Spring(s) => s.settled,
+            Animator::Tween(t) => t.settled,
+        }
+    }
+    pub fn is_tween(&self) -> bool {
+        matches!(self, Animator::Tween(_))
+    }
+
+    pub fn set(&mut self, target: f64) {
+        match self {
+            Animator::Spring(s) => s.set(target),
+            Animator::Tween(t) => t.set(target),
+        }
+    }
+    pub fn jump(&mut self, value: f64) {
+        match self {
+            Animator::Spring(s) => s.jump(value),
+            Animator::Tween(t) => t.jump(value),
+        }
+    }
+    pub fn step(&mut self, dt: f64) -> f64 {
+        match self {
+            Animator::Spring(s) => s.step(dt),
+            Animator::Tween(t) => t.step(dt),
+        }
+    }
+
+    /// 换弹簧参数（只对 Spring 生效）
+    pub fn configure_spring(&mut self, params: SpringParams) {
+        if let Animator::Spring(s) = self {
+            s.configure(params);
+        }
+    }
+    /// 换补间参数（只对 Tween 生效）
+    pub fn configure_tween(&mut self, duration: f64, easing: &'static str) {
+        if let Animator::Tween(t) = self {
+            t.duration = duration;
+            t.easing = easing;
+        }
     }
 }
 
@@ -76,46 +357,100 @@ impl Spring {
 mod tests {
     use super::*;
 
+    /// 逐位对齐 js/spring.js（下面这些数字是 node 端 toPrecision(17) 打出来的）
     #[test]
-    fn spring_reaches_target() {
-        // 一只弹簧从 0 出发,蹦向 100 喵~
-        let mut s = Spring::new(0.0);
-        for _ in 0..600 {
-            s.update_dt(100.0, 0.10, 0.68, 1.0);
-            if s.is_still() {
-                break;
-            }
+    fn 与_js_端物理参数逐位一致() {
+        let cases = [
+            ("summon", 0.55, 0.28, 285.129_891_111_943_21, 17.279_121_362_376_685),
+            ("dismiss", 0.40, 0.00, 300.894_930_694_731_61, 34.692_646_523_131_188),
+            ("expand", 0.62, 0.14, 153.394_778_303_530_39, 15.662_043_614_039_112),
+            ("collapse", 0.48, 0.10, 227.232_209_494_581_92, 20.450_958_502_924_060),
+            ("summonExp", 0.74, 0.22, 134.411_382_679_802_59, 12.936_345_176_748_603),
+            ("dismissExp", 0.52, 0.04, 158.421_313_941_461_08, 19.435_835_696_521_931),
+            ("tune", 0.28, 0.00, 614.071_287_132_105_34, 49.560_923_604_473_125),
+        ];
+        for (name, d, b, k, c) in cases {
+            let p = SpringParams::from_duration_bounce(d, b, 1.0);
+            assert!(
+                (p.stiffness - k).abs() < 1e-9,
+                "{name}: stiffness {} ≠ {k}",
+                p.stiffness
+            );
+            assert!(
+                (p.damping - c).abs() < 1e-9,
+                "{name}: damping {} ≠ {c}",
+                p.damping
+            );
         }
-        // 最终应该停在目标附近,误差小于 1 喵
-        assert!((s.value - 100.0).abs() < 1.0, "spring settled at {}", s.value);
     }
 
     #[test]
-    fn spring_snap_is_instant() {
-        // 打断必须瞬间生效,不许磨蹭喵!
-        let mut s = Spring::new(0.0);
-        s.snap(42.0);
-        assert_eq!(s.value, 42.0);
-        assert_eq!(s.velocity, 0.0);
-        assert!(s.is_still());
+    fn duration_与物理参数可往返() {
+        let mut d = 0.2;
+        while d <= 1.5 {
+            let mut b = 0.0;
+            while b <= 0.9 {
+                let p = SpringParams::from_duration_bounce(d, b, 1.3);
+                let back = p.to_duration_bounce();
+                assert!((back.duration - d).abs() < 1e-9, "duration {d}");
+                assert!((back.bounce - b).abs() < 1e-9, "bounce {b}");
+                b += 0.05;
+            }
+            d += 0.05;
+        }
     }
 
     #[test]
-    fn spring_survives_nan() {
-        // 喂 NaN 毒药也不能崩溃喵!
-        let mut s = Spring::new(f32::NAN);
-        s.update_dt(10.0, 0.1, 0.68, 1.0);
-        assert_eq!(s.value, 10.0);
-        assert_eq!(s.velocity, 0.0);
+    fn 过冲量随_bounce_单调上升() {
+        let mut prev = -1.0;
+        let mut b = 0.0;
+        while b <= 0.9001 {
+            let p = SpringParams::from_duration_bounce(0.5, b, 1.0);
+            let mut s = Spring::new(0.0, p, 0.001, 0.001);
+            s.set(100.0);
+            let mut over: f64 = 0.0;
+            for _ in 0..4000 {
+                s.step(1.0 / 240.0);
+                over = over.max(s.value - 100.0);
+            }
+            assert!(over >= prev - 0.01, "bounce {b} 过冲 {over} 小于上一档 {prev}");
+            prev = over;
+            b += 0.15;
+        }
+        // bounce=0.3 时过冲应在 15% 附近（js 端实测 15.7%）
+        let p = SpringParams::from_duration_bounce(0.5, 0.3, 1.0);
+        let mut s = Spring::new(0.0, p, 0.001, 0.001);
+        s.set(100.0);
+        let mut over: f64 = 0.0;
+        for _ in 0..4000 {
+            s.step(1.0 / 240.0);
+            over = over.max(s.value - 100.0);
+        }
+        assert!((over - 15.7).abs() < 0.5, "bounce=0.3 过冲 {over} 应约 15.7");
     }
 
     #[test]
-    fn spring_ignores_bad_dt() {
-        // 负步长或零步长直接忽略喵
-        let mut s = Spring::new(5.0);
-        s.update_dt(10.0, 0.1, 0.68, -1.0);
-        assert_eq!(s.value, 5.0);
-        s.update_dt(10.0, 0.1, 0.68, 0.0);
-        assert_eq!(s.value, 5.0);
+    fn 半路改目标保留速度() {
+        let p = SpringParams::from_duration_bounce(0.6, 0.3, 1.0);
+        let mut s = Spring::new(0.0, p, 0.001, 0.001);
+        s.set(100.0);
+        for _ in 0..40 {
+            s.step(1.0 / 240.0);
+        }
+        let v = s.velocity;
+        s.set(0.0);
+        assert_eq!(v, s.velocity, "掉头瞬间速度被清零了");
+    }
+
+    #[test]
+    fn 极端帧率不发散() {
+        let p = SpringParams::from_duration_bounce(0.5, 0.5, 1.0);
+        let mut s = Spring::new(0.0, p, 0.001, 0.001);
+        s.set(100.0);
+        for _ in 0..60 {
+            s.step(5.0);
+        }
+        assert!(s.value.is_finite());
+        assert!((s.value - 100.0).abs() < 1.0, "value = {}", s.value);
     }
 }
