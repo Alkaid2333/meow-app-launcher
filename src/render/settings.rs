@@ -59,13 +59,23 @@ pub struct SettingsGroup {
 #[derive(Debug, Clone)]
 pub enum SettingsRow {
     /// 布尔开关喵
-    Switch { label: String, value: bool },
+    Switch {
+        id: RowId,
+        label: String,
+        value: bool,
+    },
     /// 数值步进喵
-    Stepper { label: String, value: i32, min: i32, max: i32 },
+    Stepper {
+        id: RowId,
+        label: String,
+        value: i32,
+        min: i32,
+        max: i32,
+    },
     /// 只读信息喵
     Label { label: String, value: String },
     /// 动作按钮喵
-    Button { label: String },
+    Button { id: RowId, label: String },
     /// 可点选的应用行喵
     AppPick {
         name: String,
@@ -76,7 +86,11 @@ pub enum SettingsRow {
     /// 标签芯片喵
     Chip { label: String },
     /// 单行输入(显示当前草稿)喵
-    Input { label: String, value: String },
+    Input {
+        id: RowId,
+        label: String,
+        value: String,
+    },
 }
 
 /// 行命中类型喵(供交互层使用)喵
@@ -86,22 +100,58 @@ pub enum RowHit {
     Nav(usize),
     /// 红绿灯(0=关闭 1=最小化 2=占位)喵
     TrafficLight(usize),
-    /// 开关行(索引)喵
-    Switch(usize),
-    /// 步进减号(索引)喵
-    StepperDec(usize),
-    /// 步进加号(索引)喵
-    StepperInc(usize),
-    /// 按钮行(索引)喵
-    Button(usize),
+    /// 开关行喵
+    Switch(RowId),
+    /// 步进减号喵
+    StepperDec(RowId),
+    /// 步进加号喵
+    StepperInc(RowId),
+    /// 按钮行喵
+    Button(RowId),
     /// 点选应用(索引)喵
     AppPick(usize),
     /// 收藏星标(索引)喵
     FavStar(usize),
     /// 标签芯片(索引)喵
     Chip(usize),
-    /// 输入行(索引)喵
-    Input(usize),
+    /// 输入行喵
+    Input(RowId),
+}
+
+/// 配置行身份喵(热更新时不靠页面下标)喵
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowId {
+    DarkMode,
+    Backdrop,
+    Visual,
+    MotionMode,
+    Easing,
+    AutoMorph,
+    Draggable,
+    ReduceMotion,
+    IslandW,
+    IslandH,
+    IslandX,
+    IslandY,
+    ExpandedW,
+    ExpandedH,
+    ExpandedR,
+    InputRatio,
+    Margin,
+    Squash,
+    IconSize,
+    AlwaysOnTop,
+    HotkeyEnabled,
+    ShowRecent,
+    ShowFavorites,
+    ShowFrequent,
+    ShowAll,
+    SearchMode,
+    Rescan,
+    RemoveApp,
+    TagInput,
+    SpringDuration(u8),
+    SpringBounce(u8),
 }
 
 /// 布局结果喵(绘制时产出,供命中测试)喵
@@ -199,33 +249,57 @@ fn paint_sidebar(
 
     // 导航行喵
     for (i, page) in pages.iter().enumerate() {
-        let y = NAV_START_Y + i as f32 * NAV_ROW_HEIGHT;
-        let row_rect = Rect::from_xywh(8.0, y, SIDEBAR_WIDTH - 16.0, NAV_ROW_HEIGHT);
+        let y = NAV_START_Y + i as f32 * (NAV_ROW_HEIGHT + 4.0);
+        let row_rect = Rect::from_xywh(10.0, y, SIDEBAR_WIDTH - 20.0, NAV_ROW_HEIGHT);
         let selected = i == current_page;
 
-        // 选中态: accent 底色圆角行喵
         if selected {
-            let path = shape::rounded_rect_path(row_rect, 7.0);
+            let path = shape::rounded_rect_path(row_rect, 10.0);
             let mut p = Paint::default();
             p.set_color(theme.accent);
             p.set_anti_alias(true);
             canvas.draw_path(&path, &p);
         }
 
-        // 标签喵
+        let glyph = match page.title.as_str() {
+            "巢穴" => "◉",
+            "灵动岛" => "◎",
+            "弹簧" => "∿",
+            "应用" => "✧",
+            _ => "·",
+        };
         let font = fonts.font(13.0);
+        let mut gp = Paint::default();
+        gp.set_color(if selected { Color::WHITE } else { theme.moss });
+        gp.set_anti_alias(true);
+        crate::render::text::draw_centered(
+            canvas,
+            glyph,
+            Rect::from_xywh(row_rect.left, row_rect.top, 28.0, NAV_ROW_HEIGHT),
+            &font,
+            &gp,
+        );
+
         let mut p = Paint::default();
-        p.set_color(if selected {
-            Color::from_rgb(0xFF, 0xFF, 0xFF)
-        } else {
-            theme.text
-        });
+        p.set_color(if selected { Color::WHITE } else { theme.text });
         p.set_anti_alias(true);
-        let text_rect = Rect::from_xywh(16.0, y, row_rect.width() - 16.0, NAV_ROW_HEIGHT);
+        let text_rect = Rect::from_xywh(row_rect.left + 28.0, y, row_rect.width() - 36.0, NAV_ROW_HEIGHT);
         crate::render::text::draw_clipped(canvas, &page.title, text_rect, &font, &p);
 
         hits.push((row_rect, RowHit::Nav(i)));
     }
+
+    let brand_font = fonts.font(12.0);
+    let mut bp = Paint::default();
+    bp.set_color(theme.text_dim);
+    bp.set_anti_alias(true);
+    crate::render::text::draw_clipped(
+        canvas,
+        "meowal 巢",
+        Rect::from_xywh(16.0, SETTINGS_HEIGHT - 36.0, SIDEBAR_WIDTH - 32.0, 24.0),
+        &brand_font,
+        &bp,
+    );
 }
 
 /// 绘制内容区(分组卡片),返回内容总高度喵
@@ -253,7 +327,8 @@ fn paint_content(
     };
 
     let mut y = CONTENT_PADDING;
-    let mut row_index = 0;
+    let mut pick_i = 0usize;
+    let mut chip_i = 0usize;
 
     for group in &page.groups {
         // 计算分组高度喵
@@ -294,9 +369,8 @@ fn paint_content(
                 group_rect.width() - GROUP_PADDING * 2.0,
                 ROW_HEIGHT,
             );
-            paint_row(canvas, theme, fonts, row, row_rect, row_index, hits);
+            paint_row(canvas, theme, fonts, row, row_rect, scroll, hits, &mut pick_i, &mut chip_i);
             row_y += ROW_HEIGHT;
-            row_index += 1;
         }
 
         y += group_h + GROUP_GAP;
@@ -315,34 +389,31 @@ fn paint_row(
     fonts: &FontCache,
     row: &SettingsRow,
     rect: Rect,
-    index: usize,
+    scroll: f32,
     hits: &mut Vec<(Rect, RowHit)>,
+    pick_i: &mut usize,
+    chip_i: &mut usize,
 ) {
     match row {
-        SettingsRow::Switch { label, value } => {
-            // 标签喵
+        SettingsRow::Switch { id, label, value } => {
             draw_row_label(canvas, theme, fonts, label, rect);
-            // 开关喵
             draw_toggle(canvas, theme, rect, *value);
-            hits.push((rect, RowHit::Switch(index)));
+            hits.push((screen_hit(rect, scroll), RowHit::Switch(*id)));
         }
-        SettingsRow::Stepper { label, value, .. } => {
+        SettingsRow::Stepper { id, label, value, .. } => {
             draw_row_label(canvas, theme, fonts, label, rect);
-            // 减号按钮喵
             let dec_rect = Rect::from_xywh(rect.right - 96.0, rect.center_y() - 14.0, 28.0, 28.0);
             draw_control_button(canvas, theme, fonts, dec_rect, "−");
-            hits.push((dec_rect, RowHit::StepperDec(index)));
-            // 数值喵
+            hits.push((screen_hit(dec_rect, scroll), RowHit::StepperDec(*id)));
             let value_font = fonts.font(13.0);
             let mut vp = Paint::default();
             vp.set_color(theme.text);
             vp.set_anti_alias(true);
             let value_rect = Rect::from_xywh(rect.right - 68.0, rect.center_y() - 14.0, 40.0, 28.0);
             crate::render::text::draw_centered(canvas, &value.to_string(), value_rect, &value_font, &vp);
-            // 加号按钮喵
             let inc_rect = Rect::from_xywh(rect.right - 28.0, rect.center_y() - 14.0, 28.0, 28.0);
             draw_control_button(canvas, theme, fonts, inc_rect, "+");
-            hits.push((inc_rect, RowHit::StepperInc(index)));
+            hits.push((screen_hit(inc_rect, scroll), RowHit::StepperInc(*id)));
         }
         SettingsRow::Label { label, value } => {
             draw_row_label(canvas, theme, fonts, label, rect);
@@ -353,7 +424,7 @@ fn paint_row(
             let value_rect = Rect::from_xywh(rect.right - 220.0, rect.top, 220.0, rect.height());
             crate::render::text::draw_clipped(canvas, value, value_rect, &value_font, &vp);
         }
-        SettingsRow::Button { label } => {
+        SettingsRow::Button { id, label } => {
             let mut btn_rect = rect;
             btn_rect.inset((0.0, 8.0));
             let path = shape::rounded_rect_path(btn_rect, 8.0);
@@ -366,7 +437,7 @@ fn paint_row(
             p.set_color(theme.accent);
             p.set_anti_alias(true);
             crate::render::text::draw_centered(canvas, label, btn_rect, &font, &p);
-            hits.push((rect, RowHit::Button(index)));
+            hits.push((screen_hit(rect, scroll), RowHit::Button(*id)));
         }
         SettingsRow::AppPick {
             name,
@@ -393,7 +464,7 @@ fn paint_row(
             sp.set_color(if *favorite { theme.accent } else { theme.text_dim });
             sp.set_anti_alias(true);
             crate::render::text::draw_centered(canvas, star, star_rect, &font, &sp);
-            hits.push((star_rect, RowHit::FavStar(index)));
+            hits.push((screen_hit(star_rect, scroll), RowHit::FavStar(*pick_i)));
 
             let mut np = Paint::default();
             np.set_color(theme.text);
@@ -415,7 +486,8 @@ fn paint_row(
                 &fonts.font(11.0),
                 &tp,
             );
-            hits.push((rect, RowHit::AppPick(index)));
+            hits.push((screen_hit(rect, scroll), RowHit::AppPick(*pick_i)));
+            *pick_i += 1;
         }
         SettingsRow::Chip { label } => {
             let chip = Rect::from_xywh(rect.left, rect.center_y() - 12.0, 120.0f32.min(rect.width()), 24.0);
@@ -428,9 +500,10 @@ fn paint_row(
             p.set_color(theme.text);
             p.set_anti_alias(true);
             crate::render::text::draw_centered(canvas, &format!("{label} ×"), chip, &fonts.font(12.0), &p);
-            hits.push((chip, RowHit::Chip(index)));
+            hits.push((screen_hit(chip, scroll), RowHit::Chip(*chip_i)));
+            *chip_i += 1;
         }
-        SettingsRow::Input { label, value } => {
+        SettingsRow::Input { id, label, value } => {
             draw_row_label(canvas, theme, fonts, label, rect);
             let box_rect = Rect::from_xywh(rect.right - 220.0, rect.center_y() - 14.0, 220.0, 28.0);
             let path = shape::rounded_rect_path(box_rect, 7.0);
@@ -449,12 +522,15 @@ fn paint_row(
                 &fonts.font(12.0),
                 &p,
             );
-            hits.push((box_rect, RowHit::Input(index)));
+            hits.push((screen_hit(box_rect, scroll), RowHit::Input(*id)));
         }
     }
 }
 
-/// 绘制行标签喵
+/// 命中区转屏幕坐标(内容区绘制时 canvas 已 -scroll,命中要加回来)喵
+fn screen_hit(rect: Rect, scroll: f32) -> Rect {
+    Rect::from_xywh(rect.left, rect.top - scroll, rect.width(), rect.height())
+}
 fn draw_row_label(canvas: &Canvas, theme: &SettingsTheme, fonts: &FontCache, label: &str, rect: Rect) {
     let font = fonts.font(13.0);
     let mut p = Paint::default();

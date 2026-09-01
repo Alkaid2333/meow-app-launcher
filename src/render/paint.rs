@@ -1,11 +1,11 @@
-//! 场景绘制喵~
+//! 启动器场景绘制喵~
 //!
-//! 一体灵动岛: 搜索框与结果面板合成一块超椭圆,材质由主题 backdrop 拟真喵。
+//! 一体灵动岛: 搜索槽与结果面板合成一块超椭圆,视觉走 ink/glass/outline 喵。
 
+use crate::animation::IslandVisual;
 use crate::app::{AppState, ListItem};
-use crate::app::config::Backdrop;
 use crate::render::font::FontCache;
-use crate::render::layout::{self, Layout};
+use crate::render::layout::Layout;
 use crate::render::theme::Theme;
 use crate::render::{shape, text};
 use skia_safe::{BlurStyle, Canvas, Color, MaskFilter, Paint, Rect};
@@ -18,77 +18,76 @@ pub fn paint_scene(
     layout: &Layout,
     state: &mut AppState,
     fonts: &FontCache,
-    alpha: f32,
     caret_on: bool,
     ime_preedit: &str,
 ) {
     canvas.clear(Color::TRANSPARENT);
-    if alpha <= 0.001 {
+    if layout.opacity <= 0.001 {
         return;
     }
     let count = canvas.save();
-    canvas.save_layer_alpha_f(None, alpha);
+    canvas.save_layer_alpha_f(None, layout.opacity);
 
     draw_island(canvas, theme, layout);
     draw_search_content(canvas, theme, layout, state, fonts, caret_on, ime_preedit);
-    if layout.panel_height > 0.5 {
+    if layout.panel_height > 0.5 && layout.panel_opacity > 0.02 {
+        let c2 = canvas.save();
+        canvas.save_layer_alpha_f(None, layout.panel_opacity);
         draw_items(canvas, theme, layout, state, fonts);
+        canvas.restore_to_count(c2);
     }
 
     canvas.restore_to_count(count);
 }
 
-/// 一体岛外轮廓喵
-fn island_rect(layout: &Layout) -> Rect {
-    let mut r = layout.search_rect;
-    if layout.panel_height > 0.5 {
-        r.bottom = layout.panel_rect.bottom;
-    }
-    r
-}
-
 fn draw_island(canvas: &Canvas, theme: &Theme, layout: &Layout) {
-    let rect = island_rect(layout);
-    let radius = (layout::ISLAND_RADIUS * rect.height() / layout.search_rect.height().max(1.0))
-        .min(rect.height() / 2.0);
+    let rect = layout.island_rect;
+    let radius = layout.radius.min(rect.height() / 2.0).max(0.0);
     let path = shape::rounded_rect_path(rect, radius);
 
-    draw_shadow(canvas, &path, theme.shadow, 14.0, 4.0);
+    draw_shadow(canvas, &path, theme.shadow, 16.0, 5.0);
 
     let mut fill = Paint::default();
     fill.set_color(theme.fill);
     fill.set_anti_alias(true);
     canvas.draw_path(&path, &fill);
 
-    if theme.backdrop != Backdrop::Opaque {
-        draw_noise(canvas, rect, theme);
-        let hi = Rect::from_xywh(rect.left + 8.0, rect.top + 1.0, rect.width() - 16.0, 1.5);
-        let mut hp = Paint::default();
-        hp.set_color(theme.highlight);
-        hp.set_anti_alias(true);
-        canvas.draw_rect(hi, &hp);
+    match theme.visual {
+        IslandVisual::Glass => {
+            draw_noise(canvas, rect, 5, 26);
+            draw_sheen(canvas, rect, theme.highlight);
+        }
+        IslandVisual::Ink => {
+            draw_sheen(canvas, rect, theme.highlight);
+        }
+        IslandVisual::Outline => {}
     }
 
     let mut stroke = Paint::default();
-    stroke.set_color(theme.border);
+    stroke.set_color(if layout.hit {
+        theme.accent
+    } else {
+        theme.border
+    });
     stroke.set_anti_alias(true);
     stroke.set_style(skia_safe::PaintStyle::Stroke);
-    stroke.set_stroke_width(1.0);
+    stroke.set_stroke_width(if theme.visual == IslandVisual::Outline {
+        1.5
+    } else {
+        1.0
+    });
     canvas.draw_path(&path, &stroke);
 }
 
-/// 稀疏噪点,拟真云母/毛玻璃喵
-fn draw_noise(canvas: &Canvas, rect: Rect, theme: &Theme) {
-    let density = match theme.backdrop {
-        Backdrop::Mica => 7,
-        Backdrop::Acrylic => 4,
-        Backdrop::Opaque => return,
-    };
-    let alpha = match theme.backdrop {
-        Backdrop::Mica => 18u8,
-        Backdrop::Acrylic => 28u8,
-        Backdrop::Opaque => 0,
-    };
+fn draw_sheen(canvas: &Canvas, rect: Rect, color: Color) {
+    let hi = Rect::from_xywh(rect.left + 8.0, rect.top + 1.0, rect.width() - 16.0, 1.5);
+    let mut hp = Paint::default();
+    hp.set_color(color);
+    hp.set_anti_alias(true);
+    canvas.draw_rect(hi, &hp);
+}
+
+fn draw_noise(canvas: &Canvas, rect: Rect, density: usize, alpha: u8) {
     let mut p = Paint::default();
     p.set_anti_alias(false);
     let w = rect.width() as i32;
@@ -99,8 +98,7 @@ fn draw_noise(canvas: &Canvas, rect: Rect, theme: &Theme) {
             if n & 3 != 0 {
                 continue;
             }
-            let bright = n & 1 == 1;
-            p.set_color(if bright {
+            p.set_color(if n & 1 == 1 {
                 Color::from_argb(alpha, 255, 255, 255)
             } else {
                 Color::from_argb(alpha, 0, 0, 0)
@@ -113,7 +111,6 @@ fn draw_noise(canvas: &Canvas, rect: Rect, theme: &Theme) {
 fn hash32(x: u32, y: u32) -> u32 {
     x.wrapping_mul(374761393)
         .wrapping_add(y.wrapping_mul(668265263))
-        .wrapping_add(0x9E37_79B9)
         >> 24
 }
 
@@ -127,6 +124,9 @@ fn draw_search_content(
     ime_preedit: &str,
 ) {
     let rect = layout.search_rect;
+    if rect.width() < 8.0 || rect.height() < 8.0 {
+        return;
+    }
     let icon_size = rect.height() * 0.36;
     let icon_cx = rect.left + rect.height() * 0.55;
     let icon_cy = rect.center_y();
@@ -137,7 +137,7 @@ fn draw_search_content(
     let text_rect = Rect::from_xywh(
         text_x,
         rect.top,
-        rect.width() - (text_x - rect.left) - rect.height() * 0.4,
+        (rect.width() - (text_x - rect.left) - rect.height() * 0.4).max(8.0),
         rect.height(),
     );
 
@@ -169,7 +169,10 @@ fn draw_search_content(
             up.set_anti_alias(true);
             up.set_stroke_width(1.0);
             canvas.draw_line(
-                (caret_x - font.size() * ime_preedit.chars().count() as f32 * 0.55, text_rect.center_y() + font.size() * 0.5),
+                (
+                    caret_x - font.size() * ime_preedit.chars().count() as f32 * 0.55,
+                    text_rect.center_y() + font.size() * 0.5,
+                ),
                 (caret_x, text_rect.center_y() + font.size() * 0.5),
                 &up,
             );
@@ -195,20 +198,30 @@ fn draw_items(
     state: &mut AppState,
     fonts: &FontCache,
 ) {
-    let island = island_rect(layout);
-    let radius = (layout::ISLAND_RADIUS * island.height() / layout.search_rect.height().max(1.0))
-        .min(island.height() / 2.0);
-    let path = shape::rounded_rect_path(island, radius);
+    let path = shape::rounded_rect_path(layout.island_rect, layout.radius);
     canvas.save();
     canvas.clip_path(&path, None, Some(false));
+    canvas.clip_rect(layout.panel_rect, None, Some(false));
 
     let selected = state.selected;
     for (i, item_rect) in layout.item_rects.iter().enumerate() {
+        if item_rect.bottom < layout.panel_rect.top || item_rect.top > layout.panel_rect.bottom {
+            continue;
+        }
         match state.results.get(i) {
             Some(ListItem::Section(title)) => draw_section(canvas, theme, item_rect, title, fonts),
             Some(ListItem::App(app)) => {
                 let icon = state.icons.cached_image(app);
-                draw_item(canvas, theme, item_rect, app, icon, i == selected, layout, fonts);
+                draw_item(
+                    canvas,
+                    theme,
+                    item_rect,
+                    app,
+                    icon,
+                    i == selected,
+                    layout,
+                    fonts,
+                );
             }
             None => {}
         }
@@ -325,7 +338,11 @@ fn draw_fallback_icon(canvas: &Canvas, theme: &Theme, rect: Rect, name: &str, fo
     canvas.draw_path(&path, &bg);
 
     let chars: String = name.chars().take(2).collect();
-    let label = if chars.is_empty() { "?".to_string() } else { chars };
+    let label = if chars.is_empty() {
+        "?".to_string()
+    } else {
+        chars
+    };
     let font = fonts.font(rect.width() * 0.38);
     let mut p = Paint::default();
     p.set_color(theme.accent_text);
