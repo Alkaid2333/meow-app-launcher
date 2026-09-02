@@ -7,8 +7,10 @@
 //!
 //! 绘制同时产出「命中区列表」,供交互层做点击命中测试喵。
 
+use crate::render::edit::{draw_text_edit, TextEdit};
 use crate::render::font::FontCache;
 use crate::render::shape;
+use crate::render::svg;
 use crate::render::theme::SettingsTheme;
 use skia_safe::{BlurStyle, Canvas, Color, MaskFilter, Paint, PaintStyle, Rect};
 
@@ -103,6 +105,12 @@ pub enum SettingsRow {
         label: String,
         value: String,
     },
+    /// 过滤关键词行喵(index 对应配置里的过滤规则下标)喵
+    Filter {
+        index: usize,
+        keyword: String,
+        case_sensitive: bool,
+    },
 }
 
 /// 行命中类型喵(供交互层使用)喵
@@ -134,6 +142,12 @@ pub enum RowHit {
     Chip(usize),
     /// 输入行喵
     Input(RowId),
+    /// 过滤关键词输入框(规则下标)喵
+    FilterInput(usize),
+    /// 过滤关键词大小写判定(规则下标)喵
+    FilterCase(usize),
+    /// 删除过滤关键词(规则下标)喵
+    FilterDelete(usize),
     /// 恢复该项默认值喵
     Restore(RowId),
 }
@@ -177,6 +191,8 @@ pub enum RowId {
     Rescan,
     RemoveApp,
     TagInput,
+    /// 添加一条过滤关键词规则喵
+    FilterAdd,
     SpringDuration(u8),
     SpringBounce(u8),
 }
@@ -190,9 +206,20 @@ pub struct SettingsLayout {
     pub content_height: f32,
 }
 
+/// 当前文本编辑焦点喵(绘制层只读;同时只有一个输入框在编辑)喵
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EditFocus<'a> {
+    /// 正在编辑的数值行喵
+    pub stepper: Option<(RowId, &'a TextEdit)>,
+    /// 正在编辑的过滤关键词行(规则下标)喵
+    pub filter: Option<(usize, &'a TextEdit)>,
+    /// 正在编辑的标签行喵
+    pub tag: Option<&'a TextEdit>,
+}
+
 /// 绘制配置窗口喵,返回布局结果喵
 ///
-/// `edit` 为正在键入的数值行(id + 草稿 + 是否全选态);
+/// `edit` 为当前正在编辑的文本焦点(数值/过滤关键词/标签三类输入框);
 /// `recording` 为热键录制中;`dirty` 为偏离默认值的行(行首画恢复图标)喵。
 /// `width`/`height` 为窗口当前逻辑尺寸(支持拖拽缩放)喵。
 #[allow(clippy::too_many_arguments)]
@@ -203,7 +230,7 @@ pub fn paint_settings(
     pages: &[SettingsPage],
     current_page: usize,
     scroll: f32,
-    edit: Option<&(RowId, String, bool)>,
+    edit: EditFocus,
     recording: bool,
     dirty: &[RowId],
     width: f32,
@@ -243,7 +270,7 @@ pub fn paint_settings(
         paint_content(canvas, theme, fonts, pages, current_page, scroll, edit, recording, dirty, width, height, &mut hits);
 
     // 右上角关闭钮喵
-    paint_close_button(canvas, theme, fonts, width, &mut hits);
+    paint_close_button(canvas, theme, width, &mut hits);
 
     // 窗口栏(整条顶部区域可拖动窗口) + 右下角缩放手柄喵
     paint_window_chrome(canvas, theme, width, height, &mut hits);
@@ -272,17 +299,14 @@ fn paint_sidebar(
     bg.set_anti_alias(true);
     canvas.draw_rect(sidebar_rect, &bg);
 
-    // 品牌块: 小徽标 + 产品全称 + 版本喵
+    // 品牌块: 小徽标(内嵌设置齿轮) + 产品全称 + 版本喵
     let logo = Rect::from_xywh(16.0, 18.0, 30.0, 30.0);
     let logo_path = shape::rounded_rect_path(logo, 8.0);
     let mut lp = Paint::default();
     lp.set_color(theme.accent);
     lp.set_anti_alias(true);
     canvas.draw_path(&logo_path, &lp);
-    let mut gp = Paint::default();
-    gp.set_color(Color::WHITE);
-    gp.set_anti_alias(true);
-    crate::render::text::draw_centered(canvas, "喵", logo, &fonts.font(14.0), &gp);
+    svg::icon("settings").draw(canvas, inset_rect(logo, 5.0, 5.0), Color::WHITE);
 
     let mut tp = Paint::default();
     tp.set_color(theme.text);
@@ -338,24 +362,26 @@ fn paint_sidebar(
             canvas.draw_path(&bar_path, &bp);
         }
 
-        let glyph = match page.title.as_str() {
-            "常规" => "◉",
-            "灵动岛" => "◎",
-            "弹簧" => "∿",
-            "应用" => "✧",
-            _ => "·",
-        };
-        let mut gp = Paint::default();
-        gp.set_color(if selected { theme.accent } else { theme.moss });
-        gp.set_anti_alias(true);
+        let glyph_rect = Rect::from_xywh(row_rect.left + 8.0, row_rect.top, 26.0, NAV_ROW_HEIGHT);
+        let glyph_color = if selected { theme.accent } else { theme.moss };
         let font = fonts.font(13.0);
-        crate::render::text::draw_centered(
-            canvas,
-            glyph,
-            Rect::from_xywh(row_rect.left + 8.0, row_rect.top, 26.0, NAV_ROW_HEIGHT),
-            &font,
-            &gp,
-        );
+        match page.title.as_str() {
+            // 「关于」页用内嵌信息图标,其余沿用字符图标喵
+            "关于" => svg::icon("info").draw(canvas, inset_rect(glyph_rect, 6.0, 6.0), glyph_color),
+            _ => {
+                let glyph = match page.title.as_str() {
+                    "常规" => "◉",
+                    "灵动岛" => "◎",
+                    "弹簧" => "∿",
+                    "应用" => "✧",
+                    _ => "·",
+                };
+                let mut gp = Paint::default();
+                gp.set_color(glyph_color);
+                gp.set_anti_alias(true);
+                crate::render::text::draw_centered(canvas, glyph, glyph_rect, &font, &gp);
+            }
+        }
 
         let mut p = Paint::default();
         p.set_color(if selected { theme.accent } else { theme.text });
@@ -367,11 +393,10 @@ fn paint_sidebar(
     }
 }
 
-/// 绘制右上角关闭钮喵(替换苹果风红绿灯)喵
+/// 绘制右上角关闭钮喵(内嵌 SVG 关闭图标)喵
 fn paint_close_button(
     canvas: &Canvas,
     theme: &SettingsTheme,
-    fonts: &FontCache,
     width: f32,
     hits: &mut Vec<(Rect, RowHit)>,
 ) {
@@ -388,11 +413,8 @@ fn paint_close_button(
     border.set_style(PaintStyle::Stroke);
     border.set_stroke_width(1.0);
     canvas.draw_path(&path, &border);
-    // 关闭符号喵
-    let mut p = Paint::default();
-    p.set_color(theme.text_dim);
-    p.set_anti_alias(true);
-    crate::render::text::draw_centered(canvas, "✕", rect, &fonts.font(13.0), &p);
+    // 关闭符号(内嵌 SVG)喵
+    svg::icon("close").draw(canvas, rect, theme.text_dim);
     hits.push((rect, RowHit::Close));
 }
 
@@ -434,7 +456,7 @@ fn paint_content(
     pages: &[SettingsPage],
     current_page: usize,
     scroll: f32,
-    edit: Option<&(RowId, String, bool)>,
+    edit: EditFocus,
     recording: bool,
     dirty: &[RowId],
     width: f32,
@@ -555,7 +577,7 @@ fn paint_row(
     row: &SettingsRow,
     rect: Rect,
     scroll: f32,
-    edit: Option<&(RowId, String, bool)>,
+    edit: EditFocus,
     recording: bool,
     dirty: &[RowId],
     hits: &mut Vec<(Rect, RowHit)>,
@@ -573,7 +595,7 @@ fn paint_row(
         && dirty.contains(&r)
     {
         let icon = Rect::from_xywh(rect.left, rect.center_y() - 9.0, 18.0, 18.0);
-        draw_restore_icon(canvas, theme, fonts, icon);
+        draw_restore_icon(canvas, theme, icon);
         hits.push((screen_hit(icon, scroll), RowHit::Restore(r)));
         22.0
     } else {
@@ -618,12 +640,10 @@ fn paint_row(
             draw_control_button(canvas, theme, fonts, dec_rect, "−");
             hits.push((screen_hit(dec_rect, scroll), RowHit::StepperDec(*id)));
 
-            // 数值框(可点击进入手动键入)喵
+            // 数值框(可点击进入手动键入 / 光标定位 / 拖选)喵
             let box_rect = Rect::from_xywh(rect.right - 112.0, rect.center_y() - 14.0, 64.0, 28.0);
-            let editing = matches!(edit, Some((eid, _, _)) if *eid == *id);
-            let draft: Option<&str> = if editing { edit.map(|e| e.1.as_str()) } else { None };
-            let sel_all = matches!(edit, Some((eid, _, true)) if *eid == *id);
-            draw_value_box(canvas, theme, fonts, box_rect, *value, unit, editing, sel_all, draft);
+            let te = edit.stepper.and_then(|(eid, te)| (eid == *id).then_some(te));
+            draw_value_box(canvas, theme, fonts, box_rect, *value, unit, te);
             hits.push((screen_hit(box_rect, scroll), RowHit::StepperEdit(*id)));
 
             // 步进加号喵
@@ -738,24 +758,123 @@ fn paint_row(
             bg.set_color(theme.control_bg);
             bg.set_anti_alias(true);
             canvas.draw_path(&path, &bg);
-            let shown = if value.is_empty() { "输入后回车喵" } else { value };
-            let mut p = Paint::default();
-            p.set_color(if value.is_empty() { theme.text_dim } else { theme.text });
-            p.set_anti_alias(true);
+            let editing = edit.tag.is_some();
+            let mut border = Paint::default();
+            border.set_color(if editing { theme.accent } else { theme.control_border });
+            border.set_anti_alias(true);
+            border.set_style(PaintStyle::Stroke);
+            border.set_stroke_width(if editing { 1.5 } else { 1.0 });
+            canvas.draw_path(&path, &border);
+            match edit.tag {
+                Some(te) => draw_text_edit(
+                    canvas,
+                    box_rect,
+                    &fonts.font(12.0),
+                    theme.text,
+                    theme.accent,
+                    &te.text,
+                    Some(te),
+                ),
+                None => {
+                    let shown = if value.is_empty() { "输入后回车喵" } else { value };
+                    let mut p = Paint::default();
+                    p.set_color(if value.is_empty() { theme.text_dim } else { theme.text });
+                    p.set_anti_alias(true);
+                    crate::render::text::draw_clipped(
+                        canvas,
+                        shown,
+                        Rect::from_xywh(box_rect.left + 8.0, box_rect.top, box_rect.width() - 12.0, box_rect.height()),
+                        &fonts.font(12.0),
+                        &p,
+                    );
+                }
+            }
+            hits.push((screen_hit(box_rect, scroll), RowHit::Input(*id)));
+        }
+        SettingsRow::Filter {
+            index,
+            keyword,
+            case_sensitive,
+        } => {
+            // 过滤关键词行: 左侧输入框 + 中部大小写判定(checkbox) + 右侧删除按钮喵
+            let input_rect = Rect::from_xywh(
+                rect.left,
+                rect.center_y() - 14.0,
+                (rect.width() - 168.0).max(120.0),
+                28.0,
+            );
+            let input_path = shape::rounded_rect_path(input_rect, CTRL_RADIUS);
+            let mut ibg = Paint::default();
+            ibg.set_color(theme.control_bg);
+            ibg.set_anti_alias(true);
+            canvas.draw_path(&input_path, &ibg);
+            let editing = edit.filter.is_some_and(|(i, _)| i == *index);
+            let mut iborder = Paint::default();
+            iborder.set_color(if editing { theme.accent } else { theme.control_border });
+            iborder.set_anti_alias(true);
+            iborder.set_style(PaintStyle::Stroke);
+            iborder.set_stroke_width(if editing { 1.5 } else { 1.0 });
+            canvas.draw_path(&input_path, &iborder);
+            if let Some((_, te)) = edit.filter.filter(|(i, _)| i == index) {
+                draw_text_edit(
+                    canvas,
+                    input_rect,
+                    &fonts.font(12.0),
+                    theme.text,
+                    theme.accent,
+                    &te.text,
+                    Some(te),
+                );
+            } else {
+                let shown = if keyword.is_empty() { "输入过滤关键词喵…" } else { keyword };
+                let mut ip = Paint::default();
+                ip.set_color(if keyword.is_empty() { theme.text_dim } else { theme.text });
+                ip.set_anti_alias(true);
+                crate::render::text::draw_clipped(
+                    canvas,
+                    shown,
+                    Rect::from_xywh(input_rect.left + 8.0, input_rect.top, input_rect.width() - 12.0, input_rect.height()),
+                    &fonts.font(12.0),
+                    &ip,
+                );
+            }
+            hits.push((screen_hit(input_rect, scroll), RowHit::FilterInput(*index)));
+
+            // 大小写判定 checkbox(用内置 SVG) + 说明文字喵
+            let check_rect = Rect::from_xywh(rect.right - 132.0, rect.center_y() - 9.0, 18.0, 18.0);
+            draw_checkbox(canvas, theme, check_rect, *case_sensitive);
+            hits.push((screen_hit(check_rect, scroll), RowHit::FilterCase(*index)));
+            let mut cp = Paint::default();
+            cp.set_color(theme.text_dim);
+            cp.set_anti_alias(true);
             crate::render::text::draw_clipped(
                 canvas,
-                shown,
-                Rect::from_xywh(box_rect.left + 8.0, box_rect.top, box_rect.width() - 12.0, box_rect.height()),
-                &fonts.font(12.0),
-                &p,
+                "大小写",
+                Rect::from_xywh(rect.right - 108.0, rect.top, 50.0, rect.height()),
+                &fonts.font(11.0),
+                &cp,
             );
-            hits.push((screen_hit(box_rect, scroll), RowHit::Input(*id)));
+
+            // 删除按钮(内嵌关闭 SVG)喵
+            let del_rect = Rect::from_xywh(rect.right - 34.0, rect.center_y() - 13.0, 26.0, 26.0);
+            let del_path = shape::rounded_rect_path(del_rect, CTRL_RADIUS);
+            let mut dbg = Paint::default();
+            dbg.set_color(theme.control_bg);
+            dbg.set_anti_alias(true);
+            canvas.draw_path(&del_path, &dbg);
+            let mut dbr = Paint::default();
+            dbr.set_color(theme.control_border);
+            dbr.set_anti_alias(true);
+            dbr.set_style(PaintStyle::Stroke);
+            dbr.set_stroke_width(1.0);
+            canvas.draw_path(&del_path, &dbr);
+            svg::icon("close").draw(canvas, inset_rect(del_rect, 4.0, 4.0), theme.text);
+            hits.push((screen_hit(del_rect, scroll), RowHit::FilterDelete(*index)));
         }
     }
 }
 
-/// 绘制数值框喵: 静态时显示「值+单位」;编辑中显示草稿 + 光标;
-/// `sel_all` 为全选态(强调色底,键入即整体替换)喵
+/// 绘制数值框喵: 静态时显示「值+单位」;编辑中显示草稿 + 光标 + 选中态喵
 #[allow(clippy::too_many_arguments)]
 fn draw_value_box(
     canvas: &Canvas,
@@ -764,13 +883,12 @@ fn draw_value_box(
     rect: Rect,
     value: i32,
     unit: &str,
-    editing: bool,
-    sel_all: bool,
-    draft: Option<&str>,
+    te: Option<&TextEdit>,
 ) {
     let path = shape::rounded_rect_path(rect, CTRL_RADIUS);
+    let selected = te.is_some_and(|t| t.selection().is_some());
     let mut bg = Paint::default();
-    bg.set_color(if sel_all {
+    bg.set_color(if selected {
         Color::from_argb(0x2E, theme.accent.r(), theme.accent.g(), theme.accent.b())
     } else {
         theme.control_bg
@@ -780,39 +898,35 @@ fn draw_value_box(
 
     // 编辑中给强调色描边,标明「正在键入」喵
     let mut border = Paint::default();
-    border.set_color(if editing { theme.accent } else { theme.control_border });
+    border.set_color(if te.is_some() { theme.accent } else { theme.control_border });
     border.set_anti_alias(true);
     border.set_style(PaintStyle::Stroke);
-    border.set_stroke_width(if editing { 1.5 } else { 1.0 });
+    border.set_stroke_width(if te.is_some() { 1.5 } else { 1.0 });
     canvas.draw_path(&path, &border);
 
-    let font = fonts.font(12.0);
-    let mut p = Paint::default();
-    p.set_color(theme.text);
-    p.set_anti_alias(true);
-
-    if editing {
-        let text = draft.unwrap_or("");
-        let x = rect.left + 8.0;
-        let (w, _) = font.measure_str(text, Some(&p));
-        let baseline = rect.center_y() - (font.metrics().1.ascent + font.metrics().1.descent) / 2.0;
-        let baseline = baseline.round();
-        canvas.draw_str(text, (x.round(), baseline), &font, &p);
-        // 光标竖线喵
-        let mut cp = Paint::default();
-        cp.set_color(theme.accent);
-        cp.set_anti_alias(true);
-        cp.set_stroke_width(1.5);
-        let cx = x + w + 2.0;
-        canvas.draw_line((cx, rect.top + 5.0), (cx, rect.bottom - 5.0), &cp);
-    } else {
-        crate::render::text::draw_centered(
+    match te {
+        Some(te) => draw_text_edit(
             canvas,
-            &format!("{value} {unit}"),
-            Rect::from_xywh(rect.left, rect.top, rect.width(), rect.height()),
-            &font,
-            &p,
-        );
+            rect,
+            &fonts.font(12.0),
+            theme.text,
+            theme.accent,
+            &te.text,
+            Some(te),
+        ),
+        None => {
+            let font = fonts.font(12.0);
+            let mut p = Paint::default();
+            p.set_color(theme.text);
+            p.set_anti_alias(true);
+            crate::render::text::draw_centered(
+                canvas,
+                &format!("{value} {unit}"),
+                Rect::from_xywh(rect.left, rect.top, rect.width(), rect.height()),
+                &font,
+                &p,
+            );
+        }
     }
 }
 
@@ -836,6 +950,13 @@ fn draw_chip(
     p.set_color(color);
     p.set_anti_alias(true);
     crate::render::text::draw_centered(canvas, text, chip, &fonts.font(9.5), &p);
+}
+
+/// 矩形内缩(返回新值,Skia 的 inset 是原地修改返回 ())喵
+fn inset_rect(rect: Rect, dx: f32, dy: f32) -> Rect {
+    let mut r = rect;
+    r.inset((dx, dy));
+    r
 }
 
 /// 命中区转屏幕坐标(内容区绘制时 canvas 已 -scroll,命中要加回来)喵
@@ -867,8 +988,8 @@ fn draw_row_label(
     crate::render::text::draw_clipped(canvas, label, label_rect, &font, &p);
 }
 
-/// 绘制「恢复默认」图标喵: 小圆角底 + ↺ 符号喵
-fn draw_restore_icon(canvas: &Canvas, theme: &SettingsTheme, fonts: &FontCache, rect: Rect) {
+/// 绘制「恢复默认」图标喵: 小圆角底 + 内嵌回滚箭头 SVG 喵
+fn draw_restore_icon(canvas: &Canvas, theme: &SettingsTheme, rect: Rect) {
     let path = shape::rounded_rect_path(rect, 6.0);
     let mut bg = Paint::default();
     bg.set_color(theme.control_bg);
@@ -880,10 +1001,7 @@ fn draw_restore_icon(canvas: &Canvas, theme: &SettingsTheme, fonts: &FontCache, 
     border.set_style(PaintStyle::Stroke);
     border.set_stroke_width(1.0);
     canvas.draw_path(&path, &border);
-    let mut p = Paint::default();
-    p.set_color(theme.accent);
-    p.set_anti_alias(true);
-    crate::render::text::draw_centered(canvas, "↺", rect, &fonts.font(11.0), &p);
+    svg::icon("rollback-arrow").draw(canvas, inset_rect(rect, 3.0, 3.0), theme.accent);
 }
 
 /// 绘制开关喵
@@ -947,4 +1065,13 @@ fn draw_control_button(
     p.set_color(theme.text);
     p.set_anti_alias(true);
     crate::render::text::draw_centered(canvas, symbol, rect, &f, &p);
+}
+
+/// 绘制 checkbox(大小写判定开关)喵: 用内置 SVG,勾选时强调色喵
+fn draw_checkbox(canvas: &Canvas, theme: &SettingsTheme, rect: Rect, checked: bool) {
+    if checked {
+        svg::icon("checkbox-true").draw(canvas, rect, theme.accent);
+    } else {
+        svg::icon("checkbox-false").draw(canvas, rect, theme.control_border);
+    }
 }

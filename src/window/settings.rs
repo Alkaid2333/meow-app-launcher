@@ -9,12 +9,14 @@ use crate::animation::{DurationBounce, IslandTransition};
 use crate::app::config::{AppConfig, AppLayout, SearchMode};
 use crate::app::{Command, SharedState};
 use crate::platform::{Platform, PlatformWindow, WindowEvent, WindowHandler};
+use crate::render::edit::{caret_from_x, TextEdit};
 use crate::render::font::FontCache;
 use crate::render::settings::{
-    paint_settings, RowHit, RowId, SETTINGS_HEIGHT, SETTINGS_WIDTH, SettingsGroup, SettingsLayout,
-    SettingsPage, SettingsRow,
+    paint_settings, EditFocus, RowHit, RowId, SETTINGS_HEIGHT, SETTINGS_WIDTH, SettingsGroup,
+    SettingsLayout, SettingsPage, SettingsRow,
 };
 use crate::render::{Renderer, SettingsTheme};
+use skia_safe::Rect;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -22,6 +24,13 @@ use std::sync::Arc;
 
 /// 心跳间隔(ms): 隐藏时低频检查显示请求喵
 const HEARTBEAT_MS: u32 = 100;
+
+/// 正在被鼠标拖选文本的输入框喵
+#[derive(Debug, Clone, Copy)]
+struct TextDrag {
+    /// 拖选目标的输入框矩形(逻辑坐标,随滚动绘制)喵
+    rect: Rect,
+}
 
 /// 配置窗口喵
 pub struct SettingsWindow {
@@ -53,12 +62,14 @@ pub struct SettingsWindow {
     pixels: Vec<u8>,
     /// 当前选中的应用名喵
     selected_app: Option<String>,
-    /// 标签输入草稿喵
-    tag_draft: String,
-    /// 是否正在编辑标签喵
-    tag_focus: bool,
-    /// 正在手动键入的数值行(id + 草稿 + 是否未编辑)喵
-    stepper_edit: Option<(RowId, String, bool)>,
+    /// 正在手动键入的数值行(id + 文本缓冲)喵
+    stepper_edit: Option<(RowId, TextEdit)>,
+    /// 正在编辑的过滤关键词行(规则下标 + 文本缓冲)喵
+    filter_edit: Option<(usize, TextEdit)>,
+    /// 正在编辑的标签行(文本缓冲)喵
+    tag_edit: Option<TextEdit>,
+    /// 正在拖选文本的输入框喵
+    text_drag: Option<TextDrag>,
     /// 是否正在录制全局热键喵
     hotkey_capture: bool,
     /// 窗口当前逻辑尺寸(可拖拽缩放)喵
@@ -130,9 +141,10 @@ impl SettingsWindow {
             scale,
             pixels: Vec::new(),
             selected_app: None,
-            tag_draft: String::new(),
-            tag_focus: false,
             stepper_edit: None,
+            filter_edit: None,
+            tag_edit: None,
+            text_drag: None,
             hotkey_capture: false,
             win_w: SETTINGS_WIDTH,
             win_h: SETTINGS_HEIGHT,
@@ -181,7 +193,6 @@ impl SettingsWindow {
                 &state.config,
                 &state.registry.apps,
                 self.selected_app.as_deref(),
-                &self.tag_draft,
                 self.hotkey_capture,
             )
         };
@@ -198,6 +209,12 @@ impl SettingsWindow {
             let state = self.state.borrow();
             dirty_rows(&state.config)
         };
+        // 汇总当前编辑焦点(同一时刻只有一个输入框在编辑)喵
+        let edit = EditFocus {
+            stepper: self.stepper_edit.as_ref().map(|(id, te)| (*id, te)),
+            filter: self.filter_edit.as_ref().map(|(i, te)| (*i, te)),
+            tag: self.tag_edit.as_ref(),
+        };
         let layout = paint_settings(
             canvas,
             &theme,
@@ -205,7 +222,7 @@ impl SettingsWindow {
             &pages,
             self.current_page,
             self.scroll,
-            self.stepper_edit.as_ref(),
+            edit,
             self.hotkey_capture,
             &dirty,
             self.win_w,
@@ -241,9 +258,9 @@ impl SettingsWindow {
             .hits
             .iter()
             .find(|(rect, _)| rect.left <= lx && lx <= rect.right && rect.top <= ly && ly <= rect.bottom)
-            .map(|(_, h)| *h);
+            .map(|(r, h)| (*r, *h));
 
-        if let Some(hit) = hit {
+        if let Some((rect, hit)) = hit {
             match hit {
                 RowHit::TitleBar => {
                     self.begin_window_drag(x, y, false);
@@ -253,9 +270,90 @@ impl SettingsWindow {
                     self.begin_window_drag(x, y, true);
                     self.render();
                 }
+                // 文本框: 需要矩形做光标命中与拖选,提前拦截喵
+                RowHit::StepperEdit(id) => self.click_stepper_box(rect, id, lx),
+                RowHit::FilterInput(i) => self.click_filter_box(rect, i, lx),
+                RowHit::Input(_) => self.click_tag_box(rect, lx),
                 _ => self.apply_hit(hit),
             }
         }
+    }
+
+    /// 输入框通用取色画笔喵
+    fn box_paint(&self) -> skia_safe::Paint {
+        let mut p = skia_safe::Paint::default();
+        p.set_color(skia_safe::Color::BLACK);
+        p
+    }
+
+    /// 点击数值框: 未聚焦 → 全选进入编辑;已聚焦 → 光标定位并开始拖选喵
+    fn click_stepper_box(&mut self, box_rect: Rect, id: RowId, lx: f32) {
+        let paint = self.box_paint();
+        let cur = self.stepper_value(id);
+        let font = self.fonts.font(12.0);
+        // 字段借用与自方法调用分离,避免同一作用域双借用喵
+        let hit_editing_same = matches!(&self.stepper_edit, Some((eid, _)) if *eid == id);
+        if hit_editing_same {
+            if let Some((_, te)) = self.stepper_edit.as_mut() {
+                let caret = caret_from_x(&font, &paint, &te.text, box_rect.left + 8.0, lx);
+                te.begin_select(caret);
+            }
+        } else {
+            let mut te = TextEdit::new(cur.to_string());
+            te.select_all();
+            self.stepper_edit = Some((id, te));
+        }
+        self.filter_edit = None;
+        self.tag_edit = None;
+        self.text_drag = Some(TextDrag { rect: box_rect });
+        log::debug!("数值框聚焦: {id:?} 喵");
+        self.render();
+    }
+
+    /// 点击过滤关键词输入框喵
+    fn click_filter_box(&mut self, box_rect: Rect, index: usize, lx: f32) {
+        let paint = self.box_paint();
+        let font = self.fonts.font(12.0);
+        let keyword = self
+            .state
+            .borrow()
+            .config
+            .search
+            .filters
+            .get(index)
+            .map(|f| f.keyword.clone())
+            .unwrap_or_default();
+        if matches!(&self.filter_edit, Some((i, _)) if *i == index) {
+            if let Some((_, te)) = self.filter_edit.as_mut() {
+                let caret = caret_from_x(&font, &paint, &te.text, box_rect.left + 8.0, lx);
+                te.begin_select(caret);
+            }
+        } else {
+            let mut te = TextEdit::new(keyword);
+            te.select_all();
+            self.filter_edit = Some((index, te));
+        }
+        self.stepper_edit = None;
+        self.tag_edit = None;
+        self.text_drag = Some(TextDrag { rect: box_rect });
+        log::debug!("过滤关键词框聚焦: 规则 {index} 喵");
+        self.render();
+    }
+
+    /// 点击标签输入框喵
+    fn click_tag_box(&mut self, box_rect: Rect, lx: f32) {
+        let paint = self.box_paint();
+        let font = self.fonts.font(12.0);
+        if let Some(te) = self.tag_edit.as_mut() {
+            let caret = caret_from_x(&font, &paint, &te.text, box_rect.left + 8.0, lx);
+            te.begin_select(caret);
+        } else {
+            self.tag_edit = Some(TextEdit::default());
+        }
+        self.stepper_edit = None;
+        self.filter_edit = None;
+        self.text_drag = Some(TextDrag { rect: box_rect });
+        self.render();
     }
 
     /// 开始窗口拖拽/缩放喵: 锚定屏幕坐标与窗口位置/尺寸喵
@@ -271,8 +369,46 @@ impl SettingsWindow {
         log::debug!("窗口{}开始喵", if resize { "缩放" } else { "拖动" });
     }
 
-    /// 拖动窗口 / 调整窗口尺寸喵
+    /// 拖动窗口 / 调整窗口尺寸喵;先处理文本拖选喵
     fn on_mouse_move(&mut self, x: f32, y: f32) {
+        // 文本拖选: 跟随指针扩展选中区(反向也可选)喵
+        if let Some(drag) = self.text_drag {
+            let lx = x / self.scale;
+            let paint = self.box_paint();
+            if let Some((_, te)) = &mut self.stepper_edit {
+                let caret = caret_from_x(
+                    &self.fonts.font(12.0),
+                    &paint,
+                    &te.text,
+                    drag.rect.left + 8.0,
+                    lx,
+                );
+                te.extend_select(caret);
+                self.render();
+            } else if let Some((_, te)) = &mut self.filter_edit {
+                let caret = caret_from_x(
+                    &self.fonts.font(12.0),
+                    &paint,
+                    &te.text,
+                    drag.rect.left + 8.0,
+                    lx,
+                );
+                te.extend_select(caret);
+                self.render();
+            } else if let Some(te) = &mut self.tag_edit {
+                let caret = caret_from_x(
+                    &self.fonts.font(12.0),
+                    &paint,
+                    &te.text,
+                    drag.rect.left + 8.0,
+                    lx,
+                );
+                te.extend_select(caret);
+                self.render();
+            }
+            return;
+        }
+
         let Some(ref d) = self.win_drag else {
             return;
         };
@@ -298,54 +434,92 @@ impl SettingsWindow {
         }
     }
 
-    /// 处理命中动作喵
+    /// 处理命中动作喵(文本框类命中已在 handle_click 拦截)喵
     fn apply_hit(&mut self, hit: RowHit) {
         match hit {
             RowHit::Nav(i) => {
                 self.current_page = i;
                 self.scroll = 0.0;
                 self.stepper_edit = None;
+                self.filter_edit = None;
+                self.tag_edit = None;
+                self.text_drag = None;
                 self.hotkey_capture = false;
             }
             RowHit::Close => self.hide(),
             RowHit::Switch(id) => self.toggle_switch(id),
             RowHit::StepperDec(id) => self.adjust_stepper(id, -1),
             RowHit::StepperInc(id) => self.adjust_stepper(id, 1),
-            RowHit::StepperEdit(id) => self.handle_stepper_edit(id),
             RowHit::Button(id) => self.press_button(id),
             RowHit::Restore(id) => self.restore_row_defaults(id),
             RowHit::AppPick(i) => self.pick_app(i),
             RowHit::FavStar(i) => self.toggle_fav(i),
             RowHit::Chip(i) => self.remove_chip(i),
-            RowHit::Input(_) => self.tag_focus = true,
-            // 窗口栏/手柄在 handle_click 里先行拦截,这里仅收尾喵
-            RowHit::TitleBar | RowHit::ResizeGrip => {}
+            RowHit::FilterCase(i) => self.toggle_filter_case(i),
+            RowHit::FilterDelete(i) => self.delete_filter(i),
+            // 窗口栏/手柄与文本框在 handle_click 里先行拦截,这里仅收尾喵
+            RowHit::TitleBar
+            | RowHit::ResizeGrip
+            | RowHit::StepperEdit(_)
+            | RowHit::FilterInput(_)
+            | RowHit::Input(_) => {}
         }
         self.render();
     }
 
-    /// 进入数值手动键入喵: 以当前值作为草稿起点(键入即覆盖,免去先删旧值)喵
-    fn begin_stepper_edit(&mut self, id: RowId) {
-        let cur = self.stepper_value(id);
-        self.stepper_edit = Some((id, cur.to_string(), true));
-        log::debug!("数值键入开始: {id:?} 起点={cur} 喵");
-    }
-
-    /// 点击数值框: 首次点击进入键入(全选态),再次点击/拖动重新全选喵
-    fn handle_stepper_edit(&mut self, id: RowId) {
-        if self.stepper_edit.as_ref().is_some_and(|(eid, _, _)| *eid == id) {
-            if let Some((_, _, pristine)) = self.stepper_edit.as_mut() {
-                *pristine = true; // 重新全选,再键入整体替换喵
+    /// 提交过滤关键词缓冲喵(空关键词保留但不起过滤作用)喵
+    fn commit_filter_edit(&mut self) {
+        let Some((index, te)) = self.filter_edit.take() else {
+            return;
+        };
+        let mut state = self.state.borrow_mut();
+        let changed = if let Some(rule) = state.config.search.filters.get_mut(index) {
+            let kw = te.text.trim().to_string();
+            if rule.keyword != kw {
+                rule.keyword = kw;
+                true
+            } else {
+                false
             }
         } else {
-            self.begin_stepper_edit(id);
+            false
+        };
+        if changed {
+            state.persist();
+            log::info!("过滤关键词已更新: 规则 {index} 喵");
         }
+    }
+
+    /// 切换过滤规则的大小写判定喵
+    fn toggle_filter_case(&mut self, index: usize) {
+        let mut state = self.state.borrow_mut();
+        let now = if let Some(rule) = state.config.search.filters.get_mut(index) {
+            rule.case_sensitive = !rule.case_sensitive;
+            Some(rule.case_sensitive)
+        } else {
+            None
+        };
+        if let Some(v) = now {
+            state.persist();
+            log::debug!("过滤规则 {index} 大小写判定 → {v} 喵");
+        }
+    }
+
+    /// 删除过滤规则喵
+    fn delete_filter(&mut self, index: usize) {
+        let mut state = self.state.borrow_mut();
+        if index < state.config.search.filters.len() {
+            state.config.search.filters.remove(index);
+            state.persist();
+            log::info!("过滤规则 {index} 已删除,剩余 {} 条喵", state.config.search.filters.len());
+        }
+        self.filter_edit = None;
     }
 
     /// 恢复单个配置项到默认值喵
     fn restore_row_defaults(&mut self, id: RowId) {
         // 正在键入同一行时先退出编辑态,避免草稿过期喵
-        if self.stepper_edit.as_ref().is_some_and(|(eid, _, _)| *eid == id) {
+        if self.stepper_edit.as_ref().is_some_and(|(eid, _)| *eid == id) {
             self.stepper_edit = None;
         }
         let mut state = self.state.borrow_mut();
@@ -403,7 +577,7 @@ impl SettingsWindow {
     /// 步进调节喵: 按行配置的步幅增减喵
     fn adjust_stepper(&mut self, id: RowId, dir: i32) {
         // 若正在手动键入同一行,先退出键入态,避免草稿与最新值错位喵
-        if self.stepper_edit.as_ref().is_some_and(|(eid, _, _)| *eid == id) {
+        if self.stepper_edit.as_ref().is_some_and(|(eid, _)| *eid == id) {
             self.stepper_edit = None;
         }
         let Some((_, _, step)) = self.stepper_meta(id) else {
@@ -413,17 +587,17 @@ impl SettingsWindow {
         self.apply_stepper(id, cur);
     }
 
-    /// 手动键入提交: 解析草稿 → 钳制 → 写配置喵
+    /// 手动键入提交: 解析缓冲 → 钳制 → 写配置喵
     fn commit_stepper_edit(&mut self) {
-        let Some((id, draft, _)) = self.stepper_edit.take() else {
+        let Some((id, te)) = self.stepper_edit.take() else {
             return;
         };
-        match draft.trim().parse::<i32>() {
+        match te.text.trim().parse::<i32>() {
             Ok(v) => {
                 self.apply_stepper(id, v);
                 log::debug!("数值键入提交: {id:?} = {v} 喵");
             }
-            Err(_) => log::warn!("数值键入非法,已放弃: {id:?} = {draft:?} 喵"),
+            Err(_) => log::warn!("数值键入非法,已放弃: {id:?} = {:?} 喵", te.text),
         }
     }
 
@@ -536,8 +710,9 @@ impl SettingsWindow {
                 // 重置后重新注册热键 + 清空各编辑态喵
                 self.commands.borrow_mut().push_back(Command::ReapplyHotkey);
                 self.stepper_edit = None;
-                self.tag_focus = false;
-                self.tag_draft.clear();
+                self.filter_edit = None;
+                self.tag_edit = None;
+                self.text_drag = None;
                 self.hotkey_capture = false;
                 self.scroll = 0.0;
             }
@@ -573,14 +748,29 @@ impl SettingsWindow {
                     log::info!("已移除应用 {name} 喵");
                 }
             }
+            RowId::FilterAdd => {
+                let mut state = self.state.borrow_mut();
+                state
+                    .config
+                    .search
+                    .filters
+                    .push(crate::app::config::FilterRule::default());
+                let count = state.config.search.filters.len();
+                state.persist();
+                log::info!("添加过滤关键词行,共 {count} 条喵");
+                // 自动进入新一行的编辑喵
+                self.stepper_edit = None;
+                self.tag_edit = None;
+                self.filter_edit = Some((count - 1, TextEdit::default()));
+            }
             _ => {}
         }
     }
 
     fn pick_app(&mut self, index: usize) {
         self.selected_app = self.app_name_at(index);
-        self.tag_draft.clear();
-        self.tag_focus = false;
+        self.tag_edit = None;
+        self.text_drag = None;
     }
 
     fn toggle_fav(&mut self, index: usize) {
@@ -631,75 +821,103 @@ impl SettingsWindow {
         None
     }
 
-    fn on_char(&mut self, ch: char) {
-        // 数值键入中: 只收数字与负号;首次输入直接覆盖旧值(选中即替换)喵
-        if self.stepper_edit.is_some() {
-            if ch.is_ascii_digit() || ch == '-' {
-                if let Some((_, draft, pristine)) = self.stepper_edit.as_mut() {
-                    if *pristine {
-                        draft.clear();
-                        *pristine = false;
-                    }
-                    // 只允许开头的负号喵
-                    if ch == '-' && !draft.is_empty() {
-                        return;
-                    }
-                    if draft.len() < 8 {
-                        draft.push(ch);
-                    }
-                    self.render();
+    /// 文本编辑按键喵: 按下即提交(Enter)/取消(Esc),其余字符走 on_char 喵
+    fn edit_key(&mut self, key: crate::platform::Key, kind: &mut dyn FnMut(&mut SettingsWindow)) -> bool {
+        match key {
+            crate::platform::Key::Backspace => {
+                if let Some((_, te)) = &mut self.stepper_edit {
+                    te.backspace();
+                } else if let Some((_, te)) = &mut self.filter_edit {
+                    te.backspace();
+                } else if let Some(te) = &mut self.tag_edit {
+                    te.backspace();
                 }
+                self.render();
+                true
+            }
+            crate::platform::Key::Delete => {
+                if let Some((_, te)) = &mut self.stepper_edit {
+                    te.delete();
+                } else if let Some((_, te)) = &mut self.filter_edit {
+                    te.delete();
+                } else if let Some(te) = &mut self.tag_edit {
+                    te.delete();
+                }
+                self.render();
+                true
+            }
+            crate::platform::Key::Enter => {
+                kind(self);
+                self.render();
+                true
+            }
+            crate::platform::Key::Escape => {
+                self.stepper_edit = None;
+                self.filter_edit = None;
+                self.tag_edit = None;
+                self.render();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn on_char(&mut self, ch: char) {
+        if ch.is_control() {
+            return;
+        }
+        // 过滤关键词编辑喵
+        if let Some((_, te)) = &mut self.filter_edit {
+            te.insert_char(ch);
+            self.render();
+            return;
+        }
+        // 数值编辑: 只收数字;负号仅当整段选中或文本为空时允许喵
+        if let Some((_, te)) = &mut self.stepper_edit {
+            let ok = ch.is_ascii_digit()
+                || (ch == '-' && (te.text.is_empty() || te.selection().is_some()));
+            if ok {
+                te.insert_char(ch);
+                self.render();
             }
             return;
         }
-        if !self.tag_focus || ch.is_control() {
-            return;
+        // 标签编辑喵
+        if let Some(te) = &mut self.tag_edit {
+            te.insert_char(ch);
+            self.render();
         }
-        self.tag_draft.push(ch);
-        self.render();
     }
 
     fn on_key(&mut self, key: crate::platform::Key) {
-        // 数值键入中的按键喵
+        // 三个文本输入框共用编辑按键逻辑,按优先级处理提交喵
+        if self.filter_edit.is_some() {
+            self.edit_key(key, &mut |w| w.commit_filter_edit());
+            return;
+        }
         if self.stepper_edit.is_some() {
-            match key {
-                crate::platform::Key::Backspace => {
-                    if let Some((_, draft, pristine)) = self.stepper_edit.as_mut() {
-                        draft.pop();
-                        *pristine = false;
-                    }
-                    self.render();
-                }
-                crate::platform::Key::Enter => self.commit_stepper_edit(),
-                crate::platform::Key::Escape => {
-                    self.stepper_edit = None;
-                    self.render();
-                }
-                _ => {}
-            }
+            self.edit_key(key, &mut |w| w.commit_stepper_edit());
             return;
         }
-        if !self.tag_focus {
+        if self.tag_edit.is_some() {
+            self.edit_key(key, &mut |w| w.commit_tag_edit());
+        }
+    }
+
+    /// 提交标签缓冲喵(空文本忽略)喵
+    fn commit_tag_edit(&mut self) {
+        let Some(te) = self.tag_edit.take() else {
+            return;
+        };
+        let draft = te.text.trim().to_string();
+        if draft.is_empty() {
             return;
         }
-        match key {
-            crate::platform::Key::Backspace => {
-                self.tag_draft.pop();
-                self.render();
-            }
-            crate::platform::Key::Enter => {
-                if let Some(name) = self.selected_app.clone() {
-                    self.state.borrow_mut().add_tag(&name, &self.tag_draft);
-                    self.tag_draft.clear();
-                    self.render();
-                }
-            }
-            crate::platform::Key::Escape => {
-                self.tag_focus = false;
-                self.render();
-            }
-            _ => {}
+        if let Some(name) = self.selected_app.clone() {
+            self.state.borrow_mut().add_tag(&name, &draft);
+            log::info!("已为 {name} 添加标签: {draft} 喵");
         }
+        self.render();
     }
 
     /// 热键录制: 收到按键组合时保存并通知重新注册喵
@@ -776,7 +994,18 @@ impl WindowHandler for SettingsWindow {
             WindowEvent::ImePreedit(_) => {}
             WindowEvent::FilesDropped(paths) => self.drop_files(paths),
             WindowEvent::MouseMove(x, y) => self.on_mouse_move(x, y),
-            WindowEvent::MouseUp => self.win_drag = None,
+            WindowEvent::MouseUp => {
+                self.win_drag = None;
+                self.text_drag = None;
+                // 结束拖选模态(保留选中区,清锚点)喵
+                if let Some((_, te)) = &mut self.stepper_edit {
+                    te.end_select();
+                } else if let Some((_, te)) = &mut self.filter_edit {
+                    te.end_select();
+                } else if let Some(te) = &mut self.tag_edit {
+                    te.end_select();
+                }
+            }
             WindowEvent::MouseWheel(delta) => {
                 if self.visible {
                     // 滚轮滚动内容区,钳制到有效范围喵(每格滚动一行)喵
@@ -1035,12 +1264,11 @@ fn btn(id: RowId, label: String) -> SettingsRow {
     SettingsRow::Button { id, label }
 }
 
-/// 从配置构建页面模型喵
+/// 从配置构建页面模型喵(标签草稿 / 过滤草稿由绘制层的编辑焦点接管)喵
 fn build_pages(
     config: &AppConfig,
     apps: &[crate::apps::AppInfo],
     selected: Option<&str>,
-    tag_draft: &str,
     hotkey_capture: bool,
 ) -> Vec<SettingsPage> {
     let mut app_rows: Vec<SettingsRow> = vec![
@@ -1067,7 +1295,7 @@ fn build_pages(
     let mut tag_rows = vec![SettingsRow::Input {
         id: RowId::TagInput,
         label: "给选中应用加 Tag".into(),
-        value: tag_draft.into(),
+        value: String::new(),
     }];
     if let Some(name) = selected
         && let Some(app) = apps.iter().find(|a| a.name == name)
@@ -1101,6 +1329,17 @@ fn build_pages(
             "%",
         ));
     }
+
+    // 过滤关键词行喵(绘制层的编辑焦点负责草稿显示)喵
+    let mut filter_rows: Vec<SettingsRow> = Vec::new();
+    for (i, rule) in config.search.filters.iter().enumerate() {
+        filter_rows.push(SettingsRow::Filter {
+            index: i,
+            keyword: rule.keyword.clone(),
+            case_sensitive: rule.case_sensitive,
+        });
+    }
+    filter_rows.push(btn(RowId::FilterAdd, "添加过滤关键词".into()));
 
     vec![
         SettingsPage {
@@ -1266,8 +1505,12 @@ fn build_pages(
         },
         SettingsPage {
             title: "应用".into(),
-            subtitle: "注册管理 · 标签整理喵".into(),
+            subtitle: "注册管理 · 标签整理 · 关键词过滤喵".into(),
             groups: vec![
+                SettingsGroup {
+                    title: "关键词过滤".into(),
+                    rows: filter_rows,
+                },
                 SettingsGroup {
                     title: "注册".into(),
                     rows: app_rows,

@@ -152,7 +152,13 @@ impl SearchEngine {
     ///
     /// * 空查询: 按配置返回推荐区(最近/收藏/最常用/全部)——由视图层决定,这里返回空喵
     /// * 非空查询: 模糊匹配名称、全拼、首字母,取最高分喵
-    pub fn search<'a>(&self, registry: &'a crate::apps::AppRegistry, input: &str) -> Vec<&'a AppInfo> {
+    /// * 命中过滤规则的应用一律排除喵
+    pub fn search<'a>(
+        &self,
+        registry: &'a crate::apps::AppRegistry,
+        config: &crate::app::config::AppConfig,
+        input: &str,
+    ) -> Vec<&'a AppInfo> {
         let parsed = ParsedQuery::parse(input);
         if parsed.is_empty() {
             return Vec::new();
@@ -160,6 +166,9 @@ impl SearchEngine {
 
         let mut scored: Vec<(&AppInfo, f32)> = Vec::new();
         for app in &registry.apps {
+            if config.is_app_filtered(&app.name) {
+                continue;
+            }
             if let Some(score) = self.score_app(app, &parsed) {
                 scored.push((app, score));
             }
@@ -238,6 +247,7 @@ impl SearchEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::config::AppConfig;
     use crate::apps::{AppInfo, AppRegistry, AppSource};
 
     fn make_registry() -> AppRegistry {
@@ -289,7 +299,8 @@ mod tests {
     fn search_by_english_name() {
         let reg = make_registry();
         let engine = SearchEngine::new();
-        let results = engine.search(&reg, "fire");
+        let cfg = AppConfig::default();
+        let results = engine.search(&reg, &cfg, "fire");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "Firefox");
     }
@@ -300,8 +311,9 @@ mod tests {
         let mut engine = SearchEngine::new();
         // 同步拼音索引(实际运行时 AppState 会做,测试里手动做喵)
         engine.sync(&reg.apps);
+        let cfg = AppConfig::default();
         // "guge" 应命中「谷歌浏览器」喵
-        let results = engine.search(&reg, "guge");
+        let results = engine.search(&reg, &cfg, "guge");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "谷歌浏览器");
     }
@@ -311,8 +323,9 @@ mod tests {
         let reg = make_registry();
         let mut engine = SearchEngine::new();
         engine.sync(&reg.apps);
+        let cfg = AppConfig::default();
         // "gg" 首字母 → 谷歌浏览器(ggllq)喵
-        let results = engine.search(&reg, "gg");
+        let results = engine.search(&reg, &cfg, "gg");
         assert!(results.iter().any(|a| a.name == "谷歌浏览器"));
     }
 
@@ -321,7 +334,8 @@ mod tests {
         let reg = make_registry();
         let mut engine = SearchEngine::new();
         engine.sync(&reg.apps);
-        let results = engine.search(&reg, "t: 浏览器");
+        let cfg = AppConfig::default();
+        let results = engine.search(&reg, &cfg, "t: 浏览器");
         assert_eq!(results.len(), 3);
     }
 
@@ -330,7 +344,8 @@ mod tests {
         let reg = make_registry();
         let mut engine = SearchEngine::new();
         engine.sync(&reg.apps);
-        let results = engine.search(&reg, "i: z");
+        let cfg = AppConfig::default();
+        let results = engine.search(&reg, &cfg, "i: z");
         assert!(results.iter().any(|a| a.name == "终端"));
     }
 

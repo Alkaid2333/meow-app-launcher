@@ -1,6 +1,6 @@
 [package]
 name = "meow-app-launcher"
-version = "1.0.1"
+version = "1.2.1"
 edition = "2024"
 description = "喵喵应用启动器 - 类 macOS 聚焦搜索的跨平台高性能应用启动器喵"
 license = "MIT"
@@ -12,6 +12,8 @@ path = "src/main.rs"
 [dependencies]
 # Skia 图形库的安全 Rust 绑定喵(Google Skia 官方图形引擎)
 # binary-cache: 下载预编译二进制; embed-icudtl: 内嵌 ICU 数据(中文渲染无需外部文件)
+# 注: 本环境网络无法访问 github 预编译缓存,且未装 LLVM,故不开 svg feature(需换二进制),
+# 图标走 render/svg.rs 内嵌轻量渲染喵
 skia-safe = "0.99"
 logforth = { version = "0.30.1", features = ["starter-log"] }
 colored = "3.1"

@@ -19,6 +19,8 @@ pub fn paint_scene(
     fonts: &FontCache,
     caret_on: bool,
     ime_preedit: &str,
+    caret: usize,
+    selection: Option<(usize, usize)>,
 ) {
     canvas.clear(Color::TRANSPARENT);
     if layout.opacity <= 0.001 {
@@ -34,7 +36,17 @@ pub fn paint_scene(
     };
 
     draw_island(canvas, theme, layout);
-    draw_search_content(canvas, theme, layout, state, fonts, caret_on, ime_preedit);
+    draw_search_content(
+        canvas,
+        theme,
+        layout,
+        state,
+        fonts,
+        caret_on,
+        ime_preedit,
+        caret,
+        selection,
+    );
     if layout.panel_height > 0.5 && layout.panel_opacity > 0.02 {
         let c2 = canvas.save();
         canvas.save_layer_alpha_f(None, layout.panel_opacity);
@@ -111,6 +123,8 @@ fn hash32(x: u32, y: u32) -> u32 {
         >> 24
 }
 
+/// 绘制搜索槽内容喵(文本 + 选中态 + IME 下划线 + 光标)喵
+#[allow(clippy::too_many_arguments)]
 fn draw_search_content(
     canvas: &Canvas,
     theme: &Theme,
@@ -119,6 +133,8 @@ fn draw_search_content(
     fonts: &FontCache,
     caret_on: bool,
     ime_preedit: &str,
+    caret: usize,
+    selection: Option<(usize, usize)>,
 ) {
     let rect = layout.search_rect;
     if rect.width() < 8.0 || rect.height() < 8.0 {
@@ -155,11 +171,54 @@ fn draw_search_content(
             &font,
             &p,
         );
+        // 聚焦且空文本: 在起点闪烁光标,提示可输入喵
+        if caret_on {
+            let mut cp = Paint::default();
+            cp.set_color(theme.accent);
+            cp.set_anti_alias(true);
+            let cx = text_x.round().clamp(text_rect.left, text_rect.right - 2.0);
+            canvas.draw_line(
+                (cx, text_rect.center_y() - font.size() * 0.45),
+                (cx, text_rect.center_y() + font.size() * 0.45),
+                &cp,
+            );
+        }
     } else {
+        let query = &state.query;
         let mut p = Paint::default();
         p.set_color(theme.text);
         p.set_anti_alias(true);
-        let caret_x = text::draw_clipped(canvas, &shown, text_rect, &font, &p);
+        // 文字实际落点与坐标换算统一起点(与 hit-test 一致,避免光标/选点漂移)喵
+        let start_x = text_x.round();
+
+        // 选中区背景(强调色淡底,比 hover_bg 更明显;IME 组字期间不画选中)喵
+        if ime_preedit.is_empty()
+            && let Some((lo, hi)) = selection
+        {
+            let lo = lo.min(query.len());
+            let hi = hi.min(query.len());
+            if lo < hi {
+                let (w0, _) = font.measure_str(&query[..lo], Some(&p));
+                let (w1, _) = font.measure_str(&query[..hi], Some(&p));
+                let sel = Rect::from_xywh(
+                    start_x + w0,
+                    text_rect.top + 2.0,
+                    (w1 - w0).max(1.0),
+                    (text_rect.height() - 4.0).max(1.0),
+                );
+                let a = theme.accent;
+                let mut bg = Paint::default();
+                bg.set_color(Color::from_argb(0x30, a.r(), a.g(), a.b()));
+                bg.set_anti_alias(true);
+                let path = shape::rounded_rect_path(sel, 3.0);
+                canvas.save();
+                canvas.clip_rect(text_rect, None, Some(false));
+                canvas.draw_path(&path, &bg);
+                canvas.restore();
+            }
+        }
+
+        let end_x = text::draw_clipped(canvas, &shown, text_rect, &font, &p);
         if !ime_preedit.is_empty() {
             let mut up = Paint::default();
             up.set_color(theme.accent);
@@ -167,18 +226,25 @@ fn draw_search_content(
             up.set_stroke_width(1.0);
             canvas.draw_line(
                 (
-                    caret_x - font.size() * ime_preedit.chars().count() as f32 * 0.55,
+                    end_x - font.size() * ime_preedit.chars().count() as f32 * 0.55,
                     text_rect.center_y() + font.size() * 0.5,
                 ),
-                (caret_x, text_rect.center_y() + font.size() * 0.5),
+                (end_x, text_rect.center_y() + font.size() * 0.5),
                 &up,
             );
         }
         if caret_on {
+            // 光标位置: 组字时贴文末,平时贴在插入点(命中测试算出的字节位置)喵
+            let caret = if ime_preedit.is_empty() {
+                caret.min(query.len())
+            } else {
+                query.len()
+            };
+            let (w, _) = font.measure_str(&query[..caret], Some(&p));
             let mut cp = Paint::default();
             cp.set_color(theme.accent);
             cp.set_anti_alias(true);
-            let cx = caret_x.min(text_rect.right - 2.0);
+            let cx = (start_x + w).clamp(text_rect.left, text_rect.right - 2.0);
             canvas.draw_line(
                 (cx, text_rect.center_y() - font.size() * 0.45),
                 (cx, text_rect.center_y() + font.size() * 0.45),
@@ -389,7 +455,7 @@ fn draw_grid_item(
         None => draw_fallback_icon(canvas, theme, icon_rect, &app.name, fonts),
     }
 
-    // 名称居中(裁剪防溢出)喵
+    // 名称左对齐渲染(长名称只从右侧裁剪,不再左右同时截断)喵
     let name_font = fonts.font((rect.height() * 0.16).max(10.0));
     let mut np = Paint::default();
     np.set_color(theme.text);
@@ -397,12 +463,12 @@ fn draw_grid_item(
     let name_rect = Rect::from_xywh(
         rect.left + 4.0,
         icon_rect.bottom + 3.0,
-        rect.width() - 8.0,
+        (rect.width() - 8.0).max(4.0),
         rect.bottom - icon_rect.bottom - 3.0,
     );
     canvas.save();
     canvas.clip_rect(name_rect, None, Some(false));
-    text::draw_centered(canvas, &app.name, name_rect, &name_font, &np);
+    text::draw_clipped(canvas, &app.name, name_rect, &name_font, &np);
     canvas.restore();
 }
 
@@ -455,21 +521,8 @@ fn draw_shadow(canvas: &Canvas, path: &skia_safe::Path, rect: Rect, color: Color
     canvas.restore();
 }
 
-/// 绘制搜索图标喵(圆心对齐整数像素,细环描边更锐利)喵
+/// 绘制搜索图标喵(内嵌 SVG 放大镜,自动适配配色)喵
 fn draw_search_icon(canvas: &Canvas, cx: f32, cy: f32, size: f32, color: Color) {
-    let cx = cx.round();
-    let cy = cy.round();
-    let mut paint = Paint::default();
-    paint.set_color(color);
-    paint.set_anti_alias(true);
-    paint.set_style(skia_safe::PaintStyle::Stroke);
-    paint.set_stroke_width(size * 0.14);
-
-    let r = size * 0.34;
-    canvas.draw_circle((cx - size * 0.08, cy - size * 0.08), r, &paint);
-    canvas.draw_line(
-        (cx + r * 0.65 - size * 0.08, cy + r * 0.65 - size * 0.08),
-        (cx + size * 0.45, cy + size * 0.45),
-        &paint,
-    );
+    let rect = Rect::from_xywh(cx - size / 2.0, cy - size / 2.0, size, size);
+    crate::render::svg::icon("magnifying-glass").draw(canvas, rect, color);
 }

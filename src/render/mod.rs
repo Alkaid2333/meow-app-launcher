@@ -12,8 +12,10 @@ pub mod layout;
 pub mod paint;
 pub mod settings;
 pub mod shape;
+pub mod svg;
 pub mod text;
 pub mod theme;
+pub mod edit;
 
 pub use font::FontCache;
 pub use layout::Layout;
