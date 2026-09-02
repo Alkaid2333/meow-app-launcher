@@ -21,6 +21,8 @@ const GRID_CELL_H: f32 = 84.0;
 const GRID_GAP: f32 = 12.0;
 /// 网格分组头高度(逻辑 px)喵
 const GRID_SECTION_H: f32 = 28.0;
+/// 网格单元格安全边距(逻辑 px): 首行/首列内缩,聚焦框描边不贴面板边缘喵
+const GRID_CELL_INSET: f32 = 3.0;
 /// 列表模式右侧滚动条安全槽(物理 px)喵
 const LIST_GUTTER_PX: f32 = 14.0;
 
@@ -92,11 +94,13 @@ impl Layout {
             list_rects(&panel, sections.len(), scroll_offset, s)
         };
 
-        // 内容总高度: 列表 = 行数×行高;网格 = 末行底部 - 面板顶喵
+        // 内容总高度: 列表 = 行数×行高;网格 = 末行底部 - 面板顶 + 滚动回填喵
+        // 注意: item_rects 已按 scroll_offset 上移,必须把滚动量加回来,
+        // 否则内容高度随滚动「缩水」,最大滚动量/滚动条滑块会抖动回弹喵。
         let content_height = if grid {
             item_rects
                 .last()
-                .map(|r| r.bottom - panel.top)
+                .map(|r| r.bottom - panel.top + scroll_offset * s)
                 .unwrap_or(0.0)
         } else {
             sections.len() as f32 * ITEM_HEIGHT * s
@@ -168,15 +172,19 @@ pub fn grid_cols(panel_logical_width: f32) -> usize {
 }
 
 /// 网格排版: 分组头占整行,应用按 `min 单元格宽` 自动算列数,行满换行喵
+///
+/// 首行 / 首列内缩 `GRID_CELL_INSET`,聚焦框(1.5px 描边)不会贴面板边缘
+/// 被裁掉一半,保证框线完整可见喵。
 fn grid_rects(panel: &Rect, sections: &[bool], scroll_offset: f32, s: f32) -> Vec<Rect> {
     let gap = GRID_GAP * s;
     let cell_h = GRID_CELL_H * s;
     let item_w = panel.width() - LIST_GUTTER_PX;
     let cols = grid_cols(panel.width() / s);
     let cell_stretch = (item_w - gap * (cols as f32 - 1.0)) / cols as f32;
+    let inset = GRID_CELL_INSET * s;
 
     let mut rects = Vec::with_capacity(sections.len());
-    let mut y = panel.top - scroll_offset * s;
+    let mut y = panel.top - scroll_offset * s + inset;
     let mut col = 0usize;
     let mut row_open = false;
 
@@ -188,7 +196,7 @@ fn grid_rects(panel: &Rect, sections: &[bool], scroll_offset: f32, s: f32) -> Ve
                 col = 0;
                 row_open = false;
             }
-            rects.push(Rect::from_xywh(panel.left, y, item_w, GRID_SECTION_H * s));
+            rects.push(Rect::from_xywh(panel.left + inset, y, item_w - inset, GRID_SECTION_H * s));
             y += GRID_SECTION_H * s + gap;
         } else {
             if col == 0 {
@@ -198,12 +206,66 @@ fn grid_rects(panel: &Rect, sections: &[bool], scroll_offset: f32, s: f32) -> Ve
                     row_open = true;
                 }
             }
-            let x = panel.left + col as f32 * (cell_stretch + gap);
+            let x = panel.left + inset + col as f32 * (cell_stretch + gap);
             rects.push(Rect::from_xywh(x, y, cell_stretch, cell_h));
             col = (col + 1) % cols;
         }
     }
     rects
+}
+
+/// 网格可视行分组喵(跳过全行分组头,成员为 (条目索引, 水平中心))喵
+fn grid_rows(rects: &[Rect], sections: &[bool]) -> Vec<(f32, Vec<(usize, f32)>)> {
+    let mut rows: Vec<(f32, Vec<(usize, f32)>)> = Vec::new();
+    for (i, (r, is_section)) in rects.iter().zip(sections.iter()).enumerate() {
+        if *is_section {
+            continue;
+        }
+        if let Some(last) = rows.last_mut()
+            && (last.0 - r.top).abs() < 0.5
+        {
+            last.1.push((i, r.center_x()));
+        } else {
+            rows.push((r.top, vec![(i, r.center_x())]));
+        }
+    }
+    rows
+}
+
+/// 网格纵向导航: 取「同列」最近相邻行的条目喵。
+///
+/// 分组头占整行导致行排列不齐,旧实现按「固定列数」做索引跳步,
+/// 会跳过整组应用;改用几何找行内水平中心最近的条目,焦点严格逐行移动喵。
+pub fn grid_vertical_target(rects: &[Rect], sections: &[bool], cur: usize, dir: isize) -> Option<usize> {
+    let rows = grid_rows(rects, sections);
+    let row_idx = rows
+        .iter()
+        .position(|(_, items)| items.iter().any(|(i, _)| *i == cur))?;
+    let target_row: &(f32, Vec<(usize, f32)>) = if dir < 0 {
+        rows.get(row_idx.checked_sub(1)?)?
+    } else {
+        rows.get(row_idx + 1)?
+    };
+    let cur_cx = rects.get(cur)?.center_x();
+    target_row
+        .1
+        .iter()
+        .min_by(|a, b| (a.1 - cur_cx).abs().partial_cmp(&(b.1 - cur_cx).abs()).unwrap())
+        .map(|(i, _)| *i)
+}
+
+/// 网格横向导航: 同行内最近邻居(行首/行尾原地不动,不跨组跳行)喵
+pub fn grid_horizontal_target(rects: &[Rect], sections: &[bool], cur: usize, dir: isize) -> Option<usize> {
+    let rows = grid_rows(rects, sections);
+    let row = rows.iter().find(|(_, items)| items.iter().any(|(i, _)| *i == cur))?;
+    let pos = row.1.iter().position(|(i, _)| *i == cur)?;
+    let n = row.1.len();
+    let target = if dir < 0 {
+        pos.checked_sub(1)?
+    } else {
+        (pos + 1).min(n - 1)
+    };
+    (target != pos).then(|| row.1[target].0)
 }
 
 #[cfg(test)]
@@ -287,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn 列表内容超过面板时出现滚动条() {
+fn 列表内容超过面板时出现滚动条() {
         let (cfg, frame, sections) = sample_frame(true, 30);
         let l = Layout::from_frame(&cfg, 1.0, &frame, &sections, 0.0);
         assert!(l.scrollbar.is_some(), "内容溢出应有滚动条");
@@ -297,5 +359,50 @@ mod tests {
             l.item_rects[0].right <= l.panel_rect.right - 10.0,
             "条目应与滚动条保持安全距离"
         );
+    }
+
+    #[test]
+    fn 网格内容高度不随滚动缩水() {
+        // 网格模式下 content_height 必须与滚动量解耦,否则最大滚动量/滑块会抖动回弹喵
+        let (mut cfg, frame, sections) = sample_frame(true, 40);
+        cfg.window.layout = AppLayout::Grid;
+        let h0 = Layout::from_frame(&cfg, 1.0, &frame, &sections, 0.0).content_height;
+        let h_scrolled = Layout::from_frame(&cfg, 1.0, &frame, &sections, 120.0).content_height;
+        assert_eq!(h0, h_scrolled, "内容高度不应随滚动偏移变化喵");
+        assert!(h_scrolled > 0.0);
+    }
+
+    #[test]
+    fn 网格垂直导航同列移动() {
+        // 分组头占整行导致行不齐,垂直导航应保持在同列(水平中心最近)喵
+        // 面板宽 500 → (500-2)/96 ≈ 5 列,行结构可预判喵
+        let panel = Rect::from_xywh(0.0, 0.0, 500.0, 400.0);
+        let sections: Vec<bool> = [
+            vec![false; 10],
+            vec![true],
+            vec![false; 12],
+        ]
+        .concat();
+        let rects = grid_rects(&panel, &sections, 0.0, 1.0);
+        // 第一行第 3 个应用(索引 3),向下的目标应是第二行同列(索引 8)喵
+        assert_eq!(grid_vertical_target(&rects, &sections, 3, 1), Some(8));
+        // 组 B 首行(索引 11)向下的同列目标 = 索引 16 喵
+        assert_eq!(grid_vertical_target(&rects, &sections, 11, 1), Some(16));
+        // 最末行原地不动(下方无行)喵
+        assert_eq!(grid_vertical_target(&rects, &sections, 22, 1), None);
+        // 向上恢复: 索引 16 向上 → 同列上一行(索引 11)喵
+        assert_eq!(grid_vertical_target(&rects, &sections, 16, -1), Some(11));
+    }
+
+    #[test]
+    fn 网格横向导航不跨组跳行() {
+        let panel = Rect::from_xywh(0.0, 0.0, 500.0, 400.0);
+        let sections: Vec<bool> = [vec![false; 5], vec![true], vec![false; 8]].concat();
+        let rects = grid_rects(&panel, &sections, 0.0, 1.0);
+        // 行内相邻喵
+        assert_eq!(grid_horizontal_target(&rects, &sections, 0, 1), Some(1));
+        // 行首/行尾原地不动,避免焦点跨到别的分组喵
+        assert_eq!(grid_horizontal_target(&rects, &sections, 0, -1), None);
+        assert_eq!(grid_horizontal_target(&rects, &sections, 4, 1), None);
     }
 }

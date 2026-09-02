@@ -469,10 +469,11 @@ impl Platform for Win32Platform {
 /// 主窗口消息处理喵
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     use windows_sys::Win32::Graphics::Gdi::ValidateRect;
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_BACK;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_BACK};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DefWindowProcW, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-        WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT, WM_SYSKEYDOWN, WM_TIMER,
+        DefWindowProcW, IDC_ARROW, LoadCursorW, SetCursor, WM_ACTIVATE, WM_CHAR, WM_CLOSE,
+        WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY,
+        WM_PAINT, WM_SETCURSOR, WM_SYSKEYDOWN, WM_TIMER,
     };
 
     match msg {
@@ -517,9 +518,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             handle_ime_composition(hwnd, lparam);
             0
         }
-        // 鼠标左键按下喵
+        // 鼠标左键按下喵(捕获鼠标: 拖选文本/拖滑块可在窗口外持续跟随)喵
         WM_LBUTTONDOWN => {
             let (x, y) = unpack_lparam(lparam);
+            unsafe { SetCapture(hwnd) };
             with_window_handler(hwnd, |h| h.on_event(WindowEvent::MouseDown(x, y)));
             0
         }
@@ -529,8 +531,16 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             0
         }
         WM_LBUTTONUP => {
+            unsafe { ReleaseCapture() };
             with_window_handler(hwnd, |h| h.on_event(WindowEvent::MouseUp));
             0
+        }
+        // 光标由应用显式指定,避免系统误切换到「忙/加载」指针喵
+        WM_SETCURSOR => {
+            unsafe {
+                SetCursor(LoadCursorW(null_mut(), IDC_ARROW));
+            }
+            1
         }
         // 鼠标滚轮喵
         WM_MOUSEWHEEL => {

@@ -17,7 +17,7 @@ use crate::apps::AppInfo;
 use crate::apps::icon::IconExtractor;
 use crate::platform::{Key, Platform, PlatformWindow, WindowEvent, WindowHandler};
 use crate::render::{layout, FontCache, Layout, Renderer, Theme, paint_scene};
-use skia_safe::Image;
+use skia_safe::{Image, Paint};
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;
@@ -94,6 +94,16 @@ pub struct Launcher {
     timer_interval_ms: u32,
     /// 上次设置窗口位置喵(未变时跳过 SetWindowPos,省同步开销)喵
     last_win_pos: Option<(i32, i32)>,
+    /// 查询光标位置(字节偏移,UTF-8 边界,输入插入点)喵
+    caret: usize,
+    /// 查询选中区(字节区间 [lo, hi))喵,None 表示无选中喵
+    selection: Option<(usize, usize)>,
+    /// 拖选锚点(字节偏移): 按下鼠标时的位置,反向拖选的基准喵
+    sel_anchor: usize,
+    /// 是否正处于搜索框内拖选喵
+    selecting: bool,
+    /// 搜索框是否获得点击焦点喵(空文本时也闪烁光标)喵
+    search_focused: bool,
 }
 
 /// 拖拽快照喵
@@ -194,6 +204,11 @@ impl Launcher {
             just_dragged: false,
             timer_interval_ms: HEARTBEAT_MS,
             last_win_pos: None,
+            caret: 0,
+            selection: None,
+            sel_anchor: 0,
+            selecting: false,
+            search_focused: false,
         };
 
         // 首次启动后台异步扫描系统应用喵(不阻塞窗口创建)喵
@@ -221,6 +236,11 @@ impl Launcher {
         self.scroll_offset = 0.0;
         self.caret_on = true;
         self.caret_acc = Duration::ZERO;
+        self.caret = 0;
+        self.selection = None;
+        self.sel_anchor = 0;
+        self.selecting = false;
+        self.search_focused = false;
         {
             let mut state = self.state.borrow_mut();
             state.reset_search();
@@ -240,6 +260,11 @@ impl Launcher {
         log::info!("隐藏搜索框喵~");
         self.visible = false;
         self.ime_preedit.clear();
+        self.caret = 0;
+        self.selection = None;
+        self.sel_anchor = 0;
+        self.selecting = false;
+        self.search_focused = false;
         {
             let mut state = self.state.borrow_mut();
             state.reset_search();
@@ -263,16 +288,28 @@ impl Launcher {
     // 输入处理
     // ---------------------------------------------------------------------
 
-    /// 字符输入喵
+    /// 字符输入喵(支持: 插入光标处 / 替换选中区)喵
     fn on_char(&mut self, ch: char) {
-        if !ch.is_control() {
-            self.ime_preedit.clear();
-            self.state.borrow_mut().query.push(ch);
-            self.refresh_results();
+        if ch.is_control() {
+            return;
         }
+        self.ime_preedit.clear();
+        let mut q = self.state.borrow_mut();
+        let caret = self.caret.min(q.query.len());
+        if let Some((lo, hi)) = self.selection {
+            let (lo, hi) = (lo.min(q.query.len()), hi.min(q.query.len()));
+            q.query.replace_range(lo..hi, &ch.to_string());
+            self.caret = lo + ch.len_utf8();
+        } else {
+            q.query.insert(caret, ch);
+            self.caret = caret + ch.len_utf8();
+        }
+        self.selection = None;
+        drop(q);
+        self.refresh_results();
     }
 
-    /// 导航键按下喵
+    /// 导航键按下喵(网格走几何导航,列表走线性跳步)喵
     fn on_key(&mut self, key: Key) {
         match key {
             Key::Enter => self.launch_selected(),
@@ -286,22 +323,49 @@ impl Launcher {
                 }
             }
             Key::Backspace => {
-                self.state.borrow_mut().query.pop();
+                let mut q = self.state.borrow_mut();
+                let caret = self.caret.min(q.query.len());
+                if let Some((lo, hi)) = self.selection {
+                    let (lo, hi) = (lo.min(q.query.len()), hi.min(q.query.len()));
+                    q.query.replace_range(lo..hi, "");
+                    self.caret = lo;
+                } else if caret > 0 {
+                    let before = q.query[..caret]
+                        .chars()
+                        .next_back()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1);
+                    q.query.replace_range((caret - before)..caret, "");
+                    self.caret = caret - before;
+                }
+                self.selection = None;
+                drop(q);
                 self.refresh_results();
             }
-            Key::Up => self.nudge_vertical(-1),
-            Key::Down => self.nudge_vertical(1),
+            Key::Delete => {
+                let mut q = self.state.borrow_mut();
+                let caret = self.caret.min(q.query.len());
+                if let Some((lo, hi)) = self.selection {
+                    let (lo, hi) = (lo.min(q.query.len()), hi.min(q.query.len()));
+                    q.query.replace_range(lo..hi, "");
+                    self.caret = lo;
+                } else if caret < q.query.len() {
+                    let next = q.query[caret..]
+                        .chars()
+                        .next()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1);
+                    q.query.replace_range(caret..(caret + next), "");
+                }
+                self.selection = None;
+                drop(q);
+                self.refresh_results();
+            }
+            Key::Up => self.nudge_grid(-1, 0),
+            Key::Down => self.nudge_grid(1, 0),
             // 网格排版: 左右键切换列喵
-            Key::Left => {
-                if self.grid_mode() {
-                    self.nudge_selection(-1);
-                }
-            }
-            Key::Right => {
-                if self.grid_mode() {
-                    self.nudge_selection(1);
-                }
-            }
+            Key::Left if self.grid_mode() => self.nudge_grid(0, -1),
+            Key::Right if self.grid_mode() => self.nudge_grid(0, 1),
             _ => {}
         }
     }
@@ -312,7 +376,7 @@ impl Launcher {
         self.request_render();
     }
 
-    /// 鼠标按下(点击条目启动 / 拖滚动条 / 开始拖岛)喵
+    /// 鼠标按下(搜索框设光标 / 点击条目启动 / 滚动条拖滑块 / 岛外拖拽)喵
     fn on_mouse_down(&mut self, x: f32, y: f32) {
         if self.just_dragged {
             self.just_dragged = false;
@@ -321,21 +385,43 @@ impl Launcher {
         let scale = self.platform.scale_factor();
         let layout = self.current_layout(scale);
 
-        // 滚动条命中优先(轨道周边加宽命中区,支持拖动滑块)喵
+        // 滚动条命中: 只有按住「滑块」才进入拖动,点轨道空白不跳转不触发喵
         if let Some((track, thumb)) = layout.scrollbar {
             let on_track = x >= track.left - 4.0
                 && x <= track.right + 4.0
                 && y >= track.top - 4.0
                 && y <= track.bottom + 4.0;
+            let on_thumb = x >= thumb.left - 4.0
+                && x <= thumb.right + 4.0
+                && y >= thumb.top - 4.0
+                && y <= thumb.bottom + 4.0;
             if on_track {
-                let max_px = (layout.content_height - layout.panel_rect.height()).max(0.5);
-                let prog = (self.scroll_offset * scale / max_px).clamp(0.0, 1.0);
-                self.drag_scroll = Some(ScrollDrag {
-                    anchor_y: y,
-                    anchor_prog: prog,
-                    travel: (track.height() - thumb.height()).max(1.0),
-                    max_logical: max_px / scale,
-                });
+                if on_thumb {
+                    let max_px = (layout.content_height - layout.panel_rect.height()).max(0.5);
+                    let prog = (self.scroll_offset * scale / max_px).clamp(0.0, 1.0);
+                    self.drag_scroll = Some(ScrollDrag {
+                        anchor_y: y,
+                        anchor_prog: prog,
+                        travel: (track.height() - thumb.height()).max(1.0),
+                        max_logical: max_px / scale,
+                    });
+                }
+                return;
+            }
+        }
+
+        // 搜索框命中(任意状态): 单击聚焦并设定光标位置,为拖选锚定起点喵。
+        // 收起态用户点了搜索框就说明想编辑文本,只有胶囊四周的留白仍可拖岛喵。
+        {
+            let search = layout.search_rect;
+            if search.left <= x && x <= search.right && search.top <= y && y <= search.bottom {
+                let caret = self.caret_at(&layout, x);
+                self.caret = caret;
+                self.sel_anchor = caret;
+                self.selection = Some((caret, caret));
+                self.selecting = true;
+                self.search_focused = true;
+                self.request_render();
                 return;
             }
         }
@@ -369,13 +455,45 @@ impl Launcher {
     }
 
     fn on_mouse_move(&mut self, x: f32, y: f32) {
-        // 拖动滚动条: 滚动不移动窗口,客户区坐标稳定可用喵
+        // 搜索框内拖选: 以按下时的锚点为基准,正向/反向拖选都可靠喵
+        if self.selecting {
+            let layout = self.current_layout(self.platform.scale_factor().max(0.01));
+            let caret = self.caret_at(&layout, x);
+            let anchor = self.sel_anchor;
+            self.selection = Some((anchor.min(caret), anchor.max(caret)));
+            self.request_render();
+            return;
+        }
+
+        // 拖动滚动条(仅滑块): 滚动不移动窗口,客户区坐标稳定可用喵
         if let Some(ref ds) = self.drag_scroll {
             let dy = y - ds.anchor_y;
             let prog = (ds.anchor_prog + dy / ds.travel).clamp(0.0, 1.0);
             self.scroll_offset = prog * ds.max_logical;
             self.request_render();
             return;
+        }
+
+        // 悬停吸附: 指针进入扩展面板时,焦点跟随指针吸附最合适的应用喵
+        if self.drag.is_none() && self.visible && self.want_expanded() {
+            let layout = self.current_layout(self.platform.scale_factor().max(0.01));
+            let panel = layout.panel_rect;
+            if panel.left <= x && x <= panel.right && panel.top <= y && y <= panel.bottom {
+                if let Some((i, _)) = layout
+                    .item_rects
+                    .iter()
+                    .enumerate()
+                    .find(|(_, r)| r.left <= x && x <= r.right && r.top <= y && y <= r.bottom)
+                {
+                    let is_app = matches!(self.state.borrow().results.get(i), Some(ListItem::App(_)));
+                    if is_app && self.state.borrow().selected != i {
+                        self.state.borrow_mut().selected = i;
+                        log::debug!("悬停吸附选中: {} 喵", i);
+                        self.request_render();
+                    }
+                }
+                return; // 指针在面板内,不再进入岛拖拽喵
+            }
         }
 
         let Some(drag) = self.drag.as_mut() else {
@@ -404,6 +522,7 @@ impl Launcher {
     }
 
     fn on_mouse_up(&mut self) {
+        self.selecting = false;
         self.drag_scroll = None;
         if let Some(drag) = self.drag.take()
             && drag.active
@@ -429,7 +548,7 @@ impl Launcher {
         self.request_render();
     }
 
-    /// 移动选中(环绕,跳过分组头)喵
+    /// 线性移动选中(为列表模式服务,跳过分组头)喵
     fn nudge_selection(&mut self, delta: isize) {
         if self.state.borrow().results.is_empty() {
             return;
@@ -445,21 +564,77 @@ impl Launcher {
         self.state.borrow().config.window.layout == crate::app::config::AppLayout::Grid
     }
 
-    /// 纵向导航: 网格按「每行列数」为步长(上下换行),列表步长为 1 喵
-    fn nudge_vertical(&mut self, dir: isize) {
-        let step: isize = if self.grid_mode() {
-            let frame = self.island.frame();
-            crate::render::layout::grid_cols(frame.panel.w as f32).max(1) as isize
+    /// 方向键导航喵: 网格走几何定位(同列/同行),列表走线性跳步喵
+    fn nudge_grid(&mut self, vy: isize, hx: isize) {
+        if self.state.borrow().results.is_empty() {
+            return;
+        }
+        if !self.grid_mode() {
+            if vy != 0 {
+                self.nudge_selection(vy);
+            }
+            return;
+        }
+        let scale = self.platform.scale_factor().max(0.01);
+        let layout = self.current_layout(scale);
+        let sections: Vec<bool> = self
+            .state
+            .borrow()
+            .results
+            .iter()
+            .map(|i| matches!(i, ListItem::Section(_)))
+            .collect();
+        let cur = self.state.borrow().selected;
+        let target = if vy != 0 {
+            layout::grid_vertical_target(&layout.item_rects, &sections, cur, vy)
+        } else if hx != 0 {
+            layout::grid_horizontal_target(&layout.item_rects, &sections, cur, hx)
         } else {
-            1
+            None
         };
-        self.nudge_selection(dir * step);
+        if let Some(target) = target
+            && target != cur
+        {
+            self.state.borrow_mut().selected = target;
+            self.ensure_selected_visible();
+            log::debug!("网格导航: {cur} → {target} 喵");
+            self.request_render();
+        }
+    }
+
+    /// 由鼠标 x 坐标换算查询光标位置(字节偏移,与绘制共用同一套几何)喵
+    fn caret_at(&self, layout: &Layout, x: f32) -> usize {
+        let rect = layout.search_rect;
+        let text_x = (rect.left + rect.height() * 0.95).round();
+        let font = self.fonts.font(rect.height() * 0.38);
+        let paint = Paint::default();
+        let query = &self.state.borrow().query;
+        let total = font.measure_str(query, Some(&paint)).0;
+        if query.is_empty() || x >= text_x + total {
+            return query.len();
+        }
+        if x <= text_x {
+            return 0;
+        }
+        // 线性扫描各字符边界,取视觉最近的一个(与绘制像素对齐)喵
+        let mut best = 0usize;
+        let mut best_dx = (x - text_x).abs();
+        for (i, _) in query.char_indices() {
+            let w = font.measure_str(&query[..i], Some(&paint)).0;
+            let dx = (x - (text_x + w)).abs();
+            if dx < best_dx {
+                best_dx = dx;
+                best = i;
+            }
+        }
+        best
     }
 
     /// 保证选中项在结果面板可视区内,必要时滚动喵
     ///
-    /// 布局几何统一用 `current_layout` 的物理像素矩形计算(网格/列表都适用),
-    /// 修正旧实现按配置高度估算视口导致的「选中跑出窗口却不滚动」喵。
+    /// 布局几何统一用 `current_layout` 的物理像素矩形计算(网格/列表都适用)。
+    /// 滚动量必须是**增量**拼接: 旧实现把「超过视口的越界量」直接当成新的绝对滚动,
+    /// 导致每次按键都把内容猛然拽回顶部再落下,表现成窗口/内容纵向反复跳跃喵。
     fn ensure_selected_visible(&mut self) {
         if self.state.borrow().results.is_empty() {
             self.scroll_offset = 0.0;
@@ -473,14 +648,15 @@ impl Launcher {
         let Some(r) = layout.item_rects.get(self.state.borrow().selected) else {
             return;
         };
+        let max_px = (layout.content_height - panel.height()).max(0.0);
         let mut scroll_px = self.scroll_offset * scale;
         if r.top < panel.top + pad {
-            scroll_px = r.top - panel.top - pad; // 选中跑到视口上方 → 回滚喵
+            // 选中跑到视口上方 → 上滚补齐越界量喵
+            scroll_px += r.top - (panel.top + pad);
         } else if r.bottom > panel.bottom - pad {
-            scroll_px = r.bottom - (panel.bottom - pad); // 选中跑到视口下方 → 下滚喵
+            // 选中跑到视口下方 → 下滚补齐越界量喵
+            scroll_px += r.bottom - (panel.bottom - pad);
         }
-
-        let max_px = (layout.content_height - panel.height()).max(0.0);
         self.scroll_offset = scroll_px.clamp(0.0, max_px) / scale;
     }
 
@@ -775,7 +951,9 @@ impl Launcher {
         };
         let caret_on = self.caret_on
             && self.visible
-            && (!self.state.borrow().query.is_empty() || !self.ime_preedit.is_empty());
+            && (self.search_focused
+                || !self.state.borrow().query.is_empty()
+                || !self.ime_preedit.is_empty());
         {
             let canvas = self.renderer.canvas();
             let mut state = self.state.borrow_mut();
@@ -787,6 +965,8 @@ impl Launcher {
                 &self.fonts,
                 caret_on,
                 &self.ime_preedit,
+                self.caret,
+                self.selection,
             );
         }
 

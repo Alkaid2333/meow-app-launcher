@@ -147,17 +147,61 @@ impl Default for ThemeConfig {
     }
 }
 
+/// 过滤规则喵: 按关键词排除不需要的启动项喵
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilterRule {
+    /// 匹配关键词喵
+    #[serde(default)]
+    pub keyword: String,
+    /// 是否大小写敏感喵
+    #[serde(default)]
+    pub case_sensitive: bool,
+}
+
+impl FilterRule {
+    /// 是否命中应用名喵(空关键词恒不命中)喵
+    pub fn matches(&self, name: &str) -> bool {
+        if self.keyword.is_empty() {
+            return false;
+        }
+        if self.case_sensitive {
+            name.contains(self.keyword.as_str())
+        } else {
+            name.to_lowercase()
+                .contains(&self.keyword.to_lowercase())
+        }
+    }
+}
+
 /// 搜索配置喵
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchConfig {
     /// 默认搜索模式喵
     pub default_mode: SearchMode,
+    /// 过滤关键词规则喵(扫描/浏览/搜索时统一排除;旧配置缺字段时回填默认)喵
+    #[serde(default = "default_filters")]
+    pub filters: Vec<FilterRule>,
+}
+
+/// 默认过滤规则: 排除「卸载 / uninstall」类启动项喵
+fn default_filters() -> Vec<FilterRule> {
+    vec![
+        FilterRule {
+            keyword: "卸载".into(),
+            case_sensitive: false,
+        },
+        FilterRule {
+            keyword: "uninstall".into(),
+            case_sensitive: false,
+        },
+    ]
 }
 
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
             default_mode: SearchMode::Name,
+            filters: default_filters(),
         }
     }
 }
@@ -222,6 +266,11 @@ impl AppConfig {
         self.island.expanded_width = self.window.width;
         self.island.expanded_height = self.window.height;
         self.island.slot_height = self.island.height;
+    }
+
+    /// 应用是否被关键词过滤规则排除喵(名称命中任一规则即排除)喵
+    pub fn is_app_filtered(&self, name: &str) -> bool {
+        self.search.filters.iter().any(|f| f.matches(name))
     }
 
     /// 保存配置到磁盘喵,保存失败只记日志不崩溃喵~

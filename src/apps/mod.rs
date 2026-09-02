@@ -146,31 +146,6 @@ impl AppRegistry {
         self.apps.iter().find(|a| a.name == name)
     }
 
-    /// 收藏的应用喵
-    pub fn favorites(&self) -> Vec<&AppInfo> {
-        self.apps.iter().filter(|a| a.favorite).collect()
-    }
-
-    /// 最近使用的应用(按时间倒序,最多 n 个)喵
-    pub fn recent(&self, n: usize) -> Vec<&AppInfo> {
-        let mut apps: Vec<&AppInfo> = self
-            .apps
-            .iter()
-            .filter(|a| a.last_used > 0)
-            .collect();
-        apps.sort_by_key(|a| std::cmp::Reverse(a.last_used));
-        apps.truncate(n);
-        apps
-    }
-
-    /// 最常用的应用(按次数倒序,最多 n 个)喵
-    pub fn frequent(&self, n: usize) -> Vec<&AppInfo> {
-        let mut apps: Vec<&AppInfo> = self.apps.iter().filter(|a| a.launch_count > 0).collect();
-        apps.sort_by_key(|a| std::cmp::Reverse(a.launch_count));
-        apps.truncate(n);
-        apps
-    }
-
     /// 合并扫描到的应用喵(保留已有的手动信息: tag/收藏/计数)喵
     pub fn merge_scanned(&mut self, scanned: Vec<AppInfo>) -> usize {
         let mut added = 0;

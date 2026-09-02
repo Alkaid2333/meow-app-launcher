@@ -124,10 +124,21 @@ impl AppState {
     }
 
     /// 合并后台扫描结果进注册表喵(由主线程在收到异步扫描结果后调用)喵
+    ///
+    /// 命中关键词过滤规则的启动项在入库前剔除,保持注册表干净喵。
     pub fn merge_scanned(&mut self, scanned: Vec<AppInfo>) -> usize {
-        let added = self.registry.merge_scanned(scanned);
+        let total = scanned.len();
+        let visible: Vec<AppInfo> = scanned
+            .into_iter()
+            .filter(|a| !self.config.is_app_filtered(&a.name))
+            .collect();
+        let skipped = total.saturating_sub(visible.len());
+        let added = self.registry.merge_scanned(visible);
         self.search.sync(&self.registry.apps);
         self.persist();
+        if skipped > 0 {
+            log::info!("扫描完成,过滤排除 {skipped} 个应用喵");
+        }
         log::info!("应用扫描完成,新增 {added} 个喵");
         added
     }
@@ -167,7 +178,7 @@ impl AppState {
             browse_list(&self.registry, &self.config)
         } else {
             self.search
-                .search(&self.registry, q)
+                .search(&self.registry, &self.config, q)
                 .into_iter()
                 .cloned()
                 .map(ListItem::App)
@@ -265,21 +276,33 @@ impl AppState {
     }
 }
 
-/// 空查询推荐列表喵
+/// 空查询推荐列表喵(过滤规则命中的应用先行剔除)喵
 pub fn browse_list(registry: &AppRegistry, config: &AppConfig) -> Vec<ListItem> {
+    // 先过滤出可见应用,所有分组都基于这份可见集喵
+    let visible: Vec<&AppInfo> = registry
+        .apps
+        .iter()
+        .filter(|a| !config.is_app_filtered(&a.name))
+        .collect();
     let mut items = Vec::new();
     let win = &config.window;
     if win.show_recent {
-        push_section(&mut items, "最近打开", registry.recent(QUICK_LIMIT));
+        let mut v: Vec<&AppInfo> = visible.iter().copied().filter(|a| a.last_used > 0).collect();
+        v.sort_by_key(|a| std::cmp::Reverse(a.last_used));
+        v.truncate(QUICK_LIMIT);
+        push_section(&mut items, "最近打开", v);
     }
     if win.show_favorites {
-        push_section(&mut items, "收藏", registry.favorites());
+        push_section(&mut items, "收藏", visible.iter().copied().filter(|a| a.favorite).collect());
     }
     if win.show_frequent {
-        push_section(&mut items, "最常用", registry.frequent(QUICK_LIMIT));
+        let mut v: Vec<&AppInfo> = visible.iter().copied().filter(|a| a.launch_count > 0).collect();
+        v.sort_by_key(|a| std::cmp::Reverse(a.launch_count));
+        v.truncate(QUICK_LIMIT);
+        push_section(&mut items, "最常用", v);
     }
     if win.show_all {
-        push_initial_groups(&mut items, &registry.apps);
+        push_initial_groups(&mut items, &visible);
     }
     items
 }
@@ -292,7 +315,7 @@ fn push_section(items: &mut Vec<ListItem>, title: &str, apps: Vec<&AppInfo>) {
     items.extend(apps.into_iter().cloned().map(ListItem::App));
 }
 
-fn push_initial_groups(items: &mut Vec<ListItem>, apps: &[AppInfo]) {
+fn push_initial_groups(items: &mut Vec<ListItem>, apps: &[&AppInfo]) {
     if apps.is_empty() {
         return;
     }
@@ -310,7 +333,7 @@ fn push_initial_groups(items: &mut Vec<ListItem>, apps: &[AppInfo]) {
             current = letter;
             items.push(ListItem::Section(letter.to_string()));
         }
-        items.push(ListItem::App(app));
+        items.push(ListItem::App((*app).clone()));
     }
 }
 
@@ -361,5 +384,47 @@ mod tests {
             })
             .collect();
         assert_eq!(titles, ["最近打开", "收藏"]);
+    }
+
+    #[test]
+    fn browse_list_filters_uninstall_keywords() {
+        // 默认过滤规则应把「卸载 / uninstall」类启动项排除,不进入任何分组喵
+        let mut registry = AppRegistry::default();
+        registry.apps = vec![
+            app("卸载助手", false, 0, 0),
+            app("Firefox Uninstall", false, 0, 0),
+            app("Firefox", false, 0, 0),
+        ];
+        let config = AppConfig::default();
+        let items = browse_list(&registry, &config);
+        let apps: Vec<&str> = items
+            .iter()
+            .filter_map(|i| match i {
+                ListItem::App(a) => Some(a.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(apps, vec!["Firefox"], "应只剩未被过滤的应用喵");
+    }
+
+    #[test]
+    fn filter_rule_case_sensitive() {
+        use crate::app::config::FilterRule;
+        // 大小写不敏感: 任意大小写都命中喵
+        let loose = FilterRule {
+            keyword: "uninstall".into(),
+            case_sensitive: false,
+        };
+        assert!(loose.matches("Firefox Uninstall"));
+        assert!(loose.matches("UNINSTALL_工具"));
+        // 大小写敏感: 仅精确大小写命中喵
+        let strict = FilterRule {
+            keyword: "Uninstall".into(),
+            case_sensitive: true,
+        };
+        assert!(strict.matches("Uninstall"));
+        assert!(!strict.matches("uninstall"));
+        // 空关键词永不命中喵
+        assert!(!FilterRule::default().matches("任意应用"));
     }
 }
