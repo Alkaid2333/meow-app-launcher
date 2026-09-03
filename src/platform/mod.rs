@@ -146,10 +146,28 @@ pub trait TrayHandler {
     fn on_event(&mut self, event: TrayEvent);
 }
 
+/// GPU 渲染上下文喵(平台层创建,持有 GL 上下文生命周期)喵
+///
+/// 渲染层只通过它加载 GL 函数并确保上下文 current,不碰原生句柄喵。
+pub trait GpuContext {
+    /// 加载 GL 函数指针喵(内部保证上下文已 current;未找到返回 null)喵
+    fn get_proc(&self, name: &str) -> *const std::ffi::c_void;
+    /// 确保 GL 上下文在当前线程 current(每次渲染前调用,代价可忽略)喵
+    fn make_current(&self) -> bool;
+    /// 当前是否有效喵
+    fn valid(&self) -> bool;
+}
+
 /// 平台能力接口喵
 pub trait Platform: Send + Sync {
     /// 从文件路径提取图标像素喵,失败返回 None(渲染层兜底字符图标)喵
     fn extract_icon_pixels(&self, path: &str) -> Option<IconPixels>;
+
+    /// 创建 GPU 渲染上下文喵(Windows 走 WGL/OpenGL),失败返回 None 喵
+    ///
+    /// 返回的对象保证已创建并 make current 一个可用 GL 上下文,
+    /// 渲染层通过它加载 GL 函数并维持上下文 current 喵。
+    fn create_gpu_context(&self) -> Option<Box<dyn GpuContext>>;
 
     /// 启动一个应用(路径可以是 exe/lnk/url/任意可执行类型)喵,返回是否成功喵
     fn launch(&self, path: &str) -> bool;
@@ -164,6 +182,9 @@ pub trait Platform: Send + Sync {
 
     /// 取消全局热键喵
     fn unregister_global_hotkey(&self);
+
+    /// 设置开机自启喵(仅 Windows 生效,写 HKCU 注册表 Run 键),返回是否成功喵
+    fn set_auto_start(&self, enabled: bool) -> bool;
 
     /// 创建异形透明置顶窗口喵(不绑定事件处理器)喵
     fn create_window(&self, spec: &WindowSpec) -> Option<PlatformWindow>;

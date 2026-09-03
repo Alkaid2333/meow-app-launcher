@@ -9,34 +9,30 @@
 //! * 系统托盘(显示/隐藏、设置、重启、退出)喵
 //!
 //! 共享状态用 `Rc<RefCell<AppState>>`,组件间通过命令队列协调喵。
+//! 核心模块在库 `meow_app_launcher` 中,本文件仅负责装配与入口喵。
 
-mod app;
-mod animation;
-mod apps;
-mod platform;
-mod render;
-mod search;
-mod utils;
-mod window;
-
-use app::{AppState, SharedState};
+use meow_app_launcher::app::config;
+use meow_app_launcher::app::{AppState, SharedState};
+use meow_app_launcher::cli;
+use meow_app_launcher::platform;
+use meow_app_launcher::utils;
+use meow_app_launcher::window::{Launcher, SettingsWindow, Tray};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::rc::Rc;
-use window::{Launcher, SettingsWindow, Tray};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(|s| s.as_str()) == Some("register") {
-        cli_register(&args[1..]);
+        cli::cli_register(&args[1..]);
         return;
     }
 
     // 数据目录: ./.datas 喵
     let data_dir = std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
-        .join(app::config::DATA_DIR_NAME);
+        .join(config::DATA_DIR_NAME);
 
     // 日志喵(MEOWAL_VERBOSE=1 开启 debug 日志)喵
     utils::logger::init(&data_dir, std::env::var("MEOWAL_VERBOSE").is_ok());
@@ -45,6 +41,12 @@ fn main() {
     let platform = platform::platform();
     let state: SharedState = Rc::new(RefCell::new(AppState::new(platform.clone(), data_dir)));
     let commands = Rc::new(RefCell::new(VecDeque::new()));
+
+    // 0. 同步开机自启状态喵(配置开启时确保注册表一致,路径变更也能自动修复)喵
+    if state.borrow().config.auto_start {
+        let ok = platform.set_auto_start(true);
+        log::info!("启动时同步开机自启: 成功={ok} 喵");
+    }
 
     // 1. 创建配置窗口(初始隐藏)喵
     let settings_window = SettingsWindow::spawn(platform.clone(), state.clone(), commands.clone());
@@ -76,73 +78,4 @@ fn main() {
     platform.destroy_tray(&tray);
     platform.destroy_window(&launcher_window);
     platform.destroy_window(&settings_window);
-}
-
-/// `meowal register <名称> <路径> [-ico 图标]` 喵
-fn cli_register(args: &[String]) {
-    let data_dir = std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(app::config::DATA_DIR_NAME);
-    let _ = std::fs::create_dir_all(&data_dir);
-
-    let parsed = parse_register_args(args);
-    let Some((name, path, icon)) = parsed else {
-        eprintln!("用法: meowal register <应用名称> <可执行路径> [-ico 图标路径]");
-        std::process::exit(1);
-    };
-    if !std::path::Path::new(&path).exists() {
-        eprintln!("路径不存在: {path}");
-        std::process::exit(1);
-    }
-    let mut registry = apps::AppRegistry::load(&data_dir);
-    let mut app_info = apps::AppInfo::manual(&name, &path);
-    app_info.icon_path = icon;
-    registry.upsert(app_info);
-    registry.save(&data_dir);
-    println!("已注册: {name} → {path}");
-}
-
-fn parse_register_args(args: &[String]) -> Option<(String, String, Option<String>)> {
-    if args.len() < 2 {
-        return None;
-    }
-    let name = args[0].clone();
-    let path = args[1].clone();
-    let mut icon = None;
-    let mut i = 2;
-    while i < args.len() {
-        if args[i] == "-ico" {
-            icon = args.get(i + 1).cloned();
-            i += 2;
-        } else {
-            i += 1;
-        }
-    }
-    Some((name, path, icon))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_register_args;
-
-    #[test]
-    fn parse_register_basic() {
-        let args = ["记事本".into(), "C:/Windows/notepad.exe".into()];
-        let (name, path, ico) = parse_register_args(&args).unwrap();
-        assert_eq!(name, "记事本");
-        assert_eq!(path, "C:/Windows/notepad.exe");
-        assert!(ico.is_none());
-    }
-
-    #[test]
-    fn parse_register_with_ico() {
-        let args = [
-            "Chrome".into(),
-            "C:/chrome.exe".into(),
-            "-ico".into(),
-            "C:/icon.png".into(),
-        ];
-        let (_, _, ico) = parse_register_args(&args).unwrap();
-        assert_eq!(ico.as_deref(), Some("C:/icon.png"));
-    }
 }

@@ -121,7 +121,8 @@ impl SettingsWindow {
             std::process::exit(1);
         });
 
-        let renderer = Renderer::new(win_w, win_h).unwrap_or_else(|| {
+        let backend = state.borrow().config.render_backend;
+        let renderer = Renderer::new(win_w, win_h, backend, &*platform).unwrap_or_else(|| {
             log::error!("配置窗口渲染器初始化失败,即将退出喵~");
             std::process::exit(1);
         });
@@ -239,6 +240,16 @@ impl SettingsWindow {
             self.renderer.height(),
             &self.pixels,
         );
+    }
+
+    /// 按配置重建渲染器喵(切换 CPU/GPU 时调用,失败保留原渲染器)喵
+    fn recreate_renderer(&mut self) {
+        let backend = self.state.borrow().config.render_backend;
+        let (w, h) = (self.renderer.width(), self.renderer.height());
+        if let Some(renderer) = Renderer::new(w, h, backend, &*self.platform) {
+            log::info!("配置窗口渲染器已重建 → {} 喵", renderer.mode().label());
+            self.renderer = renderer;
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -528,6 +539,9 @@ impl SettingsWindow {
             log::info!("已恢复 {id:?} 到默认值喵~");
             if id == RowId::HotkeyEnabled {
                 self.commands.borrow_mut().push_back(Command::ReapplyHotkey);
+            } else if id == RowId::AutoStart {
+                // 恢复默认即关闭自启,同步注册表喵
+                self.platform.set_auto_start(state.config.auto_start);
             }
         }
     }
@@ -567,6 +581,17 @@ impl SettingsWindow {
             RowId::Draggable => state.config.island.draggable = !state.config.island.draggable,
             RowId::ReduceMotion => {
                 state.config.island.reduce_motion = !state.config.island.reduce_motion
+            }
+            RowId::AutoStart => {
+                state.config.auto_start = !state.config.auto_start;
+                // 立即写注册表;失败则回滚,保证配置与系统状态一致喵
+                let ok = self.platform.set_auto_start(state.config.auto_start);
+                if ok {
+                    log::info!("开机自启 → {} 喵", state.config.auto_start);
+                } else {
+                    state.config.auto_start = !state.config.auto_start;
+                    log::warn!("开机自启设置失败,已回滚喵~");
+                }
             }
             _ => {}
         }
@@ -707,8 +732,12 @@ impl SettingsWindow {
                 state.config = AppConfig::default();
                 state.persist();
                 log::info!("已恢复默认设置喵~");
-                // 重置后重新注册热键 + 清空各编辑态喵
+                // 重置后重新注册热键 + 同步开机自启 + 清空各编辑态喵
+                drop(state);
                 self.commands.borrow_mut().push_back(Command::ReapplyHotkey);
+                self.commands.borrow_mut().push_back(Command::RecreateRenderer);
+                self.platform.set_auto_start(false);
+                self.recreate_renderer();
                 self.stepper_edit = None;
                 self.filter_edit = None;
                 self.tag_edit = None;
@@ -736,6 +765,16 @@ impl SettingsWindow {
                     SearchMode::Initial => SearchMode::Name,
                 };
                 state.persist();
+            }
+            RowId::RenderBackend => {
+                let mut state = self.state.borrow_mut();
+                state.config.render_backend = state.config.render_backend.cycle();
+                state.persist();
+                log::info!("渲染后端 → {} 喵", state.config.render_backend.label());
+                // 切换后重建本窗口渲染器,并通知启动器同步重建喵
+                drop(state);
+                self.recreate_renderer();
+                self.commands.borrow_mut().push_back(Command::RecreateRenderer);
             }
             RowId::Rescan => {
                 self.commands.borrow_mut().push_back(Command::Rescan);
@@ -1104,6 +1143,8 @@ fn dirty_rows(cfg: &AppConfig) -> Vec<RowId> {
         RowId::IconSize,
         RowId::AlwaysOnTop,
         RowId::HotkeyEnabled,
+        RowId::AutoStart,
+        RowId::RenderBackend,
         RowId::ShowRecent,
         RowId::ShowFavorites,
         RowId::ShowFrequent,
@@ -1140,6 +1181,8 @@ fn row_is_dirty(id: RowId, cfg: &AppConfig, d: &AppConfig) -> bool {
         RowId::IconSize => (cfg.window.icon_size - d.window.icon_size).abs() > f32::EPSILON,
         RowId::AlwaysOnTop => cfg.window.always_on_top != d.window.always_on_top,
         RowId::HotkeyEnabled => cfg.hotkey.enabled != d.hotkey.enabled,
+        RowId::AutoStart => cfg.auto_start != d.auto_start,
+        RowId::RenderBackend => cfg.render_backend != d.render_backend,
         RowId::ShowRecent => cfg.window.show_recent != d.window.show_recent,
         RowId::ShowFavorites => cfg.window.show_favorites != d.window.show_favorites,
         RowId::ShowFrequent => cfg.window.show_frequent != d.window.show_frequent,
@@ -1186,6 +1229,8 @@ fn restore_default(id: RowId, cfg: &mut AppConfig) -> bool {
         RowId::IconSize => cfg.window.icon_size = d.window.icon_size,
         RowId::AlwaysOnTop => cfg.window.always_on_top = d.window.always_on_top,
         RowId::HotkeyEnabled => cfg.hotkey.enabled = d.hotkey.enabled,
+        RowId::AutoStart => cfg.auto_start = d.auto_start,
+        RowId::RenderBackend => cfg.render_backend = d.render_backend,
         RowId::ShowRecent => cfg.window.show_recent = d.window.show_recent,
         RowId::ShowFavorites => cfg.window.show_favorites = d.window.show_favorites,
         RowId::ShowFrequent => cfg.window.show_frequent = d.window.show_frequent,
@@ -1409,6 +1454,16 @@ fn build_pages(
                 SettingsGroup {
                     title: "维护".into(),
                     rows: vec![btn(RowId::Reset, "恢复默认设置".into())],
+                },
+                SettingsGroup {
+                    title: "系统".into(),
+                    rows: vec![
+                        sw(RowId::AutoStart, "开机自启", config.auto_start),
+                        btn(
+                            RowId::RenderBackend,
+                            format!("渲染后端 · {}", config.render_backend.label()),
+                        ),
+                    ],
                 },
             ],
         },

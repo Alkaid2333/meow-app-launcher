@@ -165,7 +165,8 @@ impl Launcher {
             std::process::exit(1);
         });
 
-        let renderer = Renderer::new(win_w, win_h).unwrap_or_else(|| {
+        let backend = state.borrow().config.render_backend;
+        let renderer = Renderer::new(win_w, win_h, backend, &*platform).unwrap_or_else(|| {
             log::error!("渲染器初始化失败,即将退出喵~");
             std::process::exit(1);
         });
@@ -738,6 +739,7 @@ impl Launcher {
                         log::info!("全局热键已禁用喵");
                     }
                 }
+                Command::RecreateRenderer => self.recreate_renderer(),
                 Command::Quit => self.quit(),
             }
         }
@@ -894,6 +896,17 @@ impl Launcher {
             log::debug!("灵动岛配置热更新喵");
             self.island.set_config(cfg, animate);
             self.start_animation();
+        }
+    }
+
+    /// 按配置重建渲染器喵(切换 CPU/GPU 时调用,失败保留原渲染器)喵
+    fn recreate_renderer(&mut self) {
+        let backend = self.state.borrow().config.render_backend;
+        let (w, h) = (self.renderer.width(), self.renderer.height());
+        if let Some(renderer) = Renderer::new(w, h, backend, &*self.platform) {
+            log::info!("启动器渲染器已重建 → {} 喵", renderer.mode().label());
+            self.renderer = renderer;
+            self.request_render();
         }
     }
 

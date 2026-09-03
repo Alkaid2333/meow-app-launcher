@@ -71,6 +71,35 @@ pub enum SearchMode {
     Initial,
 }
 
+/// 渲染后端喵(可切换,GPU 初始化失败时自动回退 CPU)喵
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderBackend {
+    /// CPU 光栅渲染喵(默认,兼容性最好)喵
+    #[default]
+    Cpu,
+    /// GPU 渲染喵(Windows 走 OpenGL/WGL,失败回退 CPU)喵
+    Gpu,
+}
+
+impl RenderBackend {
+    /// 给配置 GUI 看的名字喵
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Cpu => "CPU",
+            Self::Gpu => "GPU",
+        }
+    }
+
+    /// 循环切换喵
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Cpu => Self::Gpu,
+            Self::Gpu => Self::Cpu,
+        }
+    }
+}
+
 /// 全局热键配置喵
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HotkeyConfig {
@@ -220,6 +249,12 @@ pub struct AppConfig {
     /// 灵动岛几何 / 动画 / 视觉喵
     #[serde(default)]
     pub island: IslandConfig,
+    /// 开机自启喵(仅 Windows 生效,写注册表 Run 键;默认关闭)喵
+    #[serde(default)]
+    pub auto_start: bool,
+    /// 渲染后端喵(CPU/GPU 可切换,GPU 失败自动回退 CPU)喵
+    #[serde(default)]
+    pub render_backend: RenderBackend,
 }
 
 impl Default for AppConfig {
@@ -235,6 +270,8 @@ impl Default for AppConfig {
             theme: ThemeConfig::default(),
             search: SearchConfig::default(),
             island,
+            auto_start: false,
+            render_backend: RenderBackend::default(),
         }
     }
 }
