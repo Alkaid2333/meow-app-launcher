@@ -8,8 +8,8 @@
 //! 不是 tuple struct,所以直接用指针、跨线程存储时转 usize 喵。
 
 use super::{
-    IconPixels, Key, Platform, PlatformWindow, TrayEvent, TrayHandle, TrayHandler, TrayMenuItem,
-    WindowEvent, WindowHandler, WindowSpec,
+    GpuContext, IconPixels, Key, Platform, PlatformWindow, TrayEvent, TrayHandle, TrayHandler,
+    TrayMenuItem, WindowEvent, WindowHandler, WindowSpec,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -101,6 +101,10 @@ impl Platform for Win32Platform {
         extract_icon_pixels_impl(path)
     }
 
+    fn create_gpu_context(&self) -> Option<Box<dyn GpuContext>> {
+        create_gpu_context_impl()
+    }
+
     fn launch(&self, path: &str) -> bool {
         launch_impl(path)
     }
@@ -156,6 +160,10 @@ impl Platform for Win32Platform {
                 );
             }
         }
+    }
+
+    fn set_auto_start(&self, enabled: bool) -> bool {
+        set_auto_start_impl(enabled)
     }
 
     fn create_window(&self, spec: &WindowSpec) -> Option<PlatformWindow> {
@@ -914,6 +922,286 @@ fn enable_dpi_awareness() {
 // ---------------------------------------------------------------------------
 // 每像素透明呈现: UpdateLayeredWindow
 // ---------------------------------------------------------------------------
+
+/// 开机自启键名喵(注册表 Run 值)
+const AUTO_START_VALUE: &str = "MeowAppLauncher";
+
+/// 设置开机自启喵: 写入/删除 `HKCU\...\CurrentVersion\Run` 喵
+///
+/// 开启时写入 `"当前 exe 路径"`(带引号,路径含空格安全);
+/// 关闭时删除对应值(值不存在也视为成功,保证幂等)喵。
+fn set_auto_start_impl(enabled: bool) -> bool {
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+        KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ,
+    };
+    use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
+
+    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    const REG_NONE: *const u16 = std::ptr::null();
+    let key_wide: Vec<u16> = RUN_KEY.encode_utf16().chain(Some(0)).collect();
+    let value_wide: Vec<u16> = AUTO_START_VALUE.encode_utf16().chain(Some(0)).collect();
+
+    unsafe {
+        let mut key: HKEY = null_mut();
+        // 先尝试打开(通常已存在)喵
+        let mut opened = windows_sys::Win32::System::Registry::RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            key_wide.as_ptr(),
+            0,
+            KEY_SET_VALUE,
+            &mut key,
+        ) == 0;
+        if !opened {
+            // 不存在则创建喵
+            let mut disp = 0u32;
+            opened = RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                key_wide.as_ptr(),
+                0,
+                REG_NONE,
+                REG_OPTION_NON_VOLATILE,
+                KEY_SET_VALUE,
+                null_mut(),
+                &mut key,
+                &mut disp,
+            ) == 0;
+        }
+        if !opened {
+            log::error!("开机自启: 无法打开/创建 Run 注册表键喵");
+            return false;
+        }
+
+        let ok = if enabled {
+            match std::env::current_exe() {
+                Ok(exe) => {
+                    let cmd = format!("\"{}\"", exe.to_string_lossy());
+                    let data: Vec<u16> = cmd.encode_utf16().chain(Some(0)).collect();
+                    let rc = RegSetValueExW(
+                        key,
+                        value_wide.as_ptr(),
+                        0,
+                        REG_SZ,
+                        data.as_ptr() as *const u8,
+                        (data.len() * 2) as u32,
+                    );
+                    if rc == 0 {
+                        log::info!("开机自启已开启: {cmd} 喵");
+                    } else {
+                        log::error!("开机自启: 写注册表失败(rc={rc})喵");
+                    }
+                    rc == 0
+                }
+                Err(e) => {
+                    log::error!("开机自启: 无法获取当前可执行路径({e})喵");
+                    false
+                }
+            }
+        } else {
+            let rc = RegDeleteValueW(key, value_wide.as_ptr());
+            if rc == 0 {
+                log::info!("开机自启已关闭喵");
+                true
+            } else if rc == ERROR_FILE_NOT_FOUND {
+                // 本来就没开,幂等成功喵
+                log::debug!("开机自启本就未开启,跳过删除喵");
+                true
+            } else {
+                log::error!("开机自启: 删除注册表值失败(rc={rc})喵");
+                false
+            }
+        };
+
+        let _ = RegCloseKey(key);
+        ok
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GPU 渲染上下文: WGL / OpenGL
+// ---------------------------------------------------------------------------
+
+/// WGL 像素格式描述符喵(windows-sys 0.59 未提供,按标准签名手写)喵
+#[repr(C)]
+struct PixelFormatDescriptor {
+    n_size: u16,
+    n_version: u16,
+    dw_flags: u32,
+    i_pixel_type: u8,
+    c_color_bits: u8,
+    c_red_bits: u8,
+    c_red_shift: u8,
+    c_green_bits: u8,
+    c_green_shift: u8,
+    c_blue_bits: u8,
+    c_blue_shift: u8,
+    c_alpha_bits: u8,
+    c_alpha_shift: u8,
+    c_accum_bits: u8,
+    c_accum_red_bits: u8,
+    c_accum_green_bits: u8,
+    c_accum_blue_bits: u8,
+    c_accum_alpha_bits: u8,
+    c_depth_bits: u8,
+    c_stencil_bits: u8,
+    c_aux_buffers: u8,
+    i_layer_type: u8,
+    b_reserved: u8,
+    dw_layer_mask: u32,
+    dw_visible_mask: u32,
+    dw_damage_mask: u32,
+}
+
+const PFD_DRAW_TO_WINDOW: u32 = 0x0000_0004;
+const PFD_SUPPORT_OPENGL: u32 = 0x0000_0020;
+const PFD_DOUBLEBUFFER: u32 = 0x0000_0001;
+const PFD_TYPE_RGBA: u8 = 0;
+
+#[link(name = "gdi32")]
+unsafe extern "system" {
+    fn ChoosePixelFormat(hdc: *mut std::ffi::c_void, ppfd: *const PixelFormatDescriptor) -> i32;
+    fn SetPixelFormat(
+        hdc: *mut std::ffi::c_void,
+        i_pixel_format: i32,
+        ppfd: *const PixelFormatDescriptor,
+    ) -> i32;
+}
+
+#[link(name = "opengl32")]
+unsafe extern "system" {
+    fn wglCreateContext(hdc: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn wglMakeCurrent(hdc: *mut std::ffi::c_void, hglrc: *mut std::ffi::c_void) -> i32;
+    fn wglDeleteContext(hglrc: *mut std::ffi::c_void) -> i32;
+    fn wglGetProcAddress(lp_proc_name: *const std::os::raw::c_char) -> *const std::ffi::c_void;
+}
+
+/// WGL 渲染上下文句柄喵(隐藏窗口 + 设备上下文 + GL 上下文)喵
+struct WinGpuContext {
+    /// 隐藏窗口句柄喵
+    hwnd: usize,
+    /// 窗口设备上下文喵
+    hdc: windows_sys::Win32::Graphics::Gdi::HDC,
+    /// GL 上下文句柄喵
+    hglrc: *mut std::ffi::c_void,
+}
+
+impl GpuContext for WinGpuContext {
+    fn get_proc(&self, name: &str) -> *const std::ffi::c_void {
+        let Ok(cname) = std::ffi::CString::new(name) else {
+            return null_mut();
+        };
+        unsafe {
+            let p = wglGetProcAddress(cname.as_ptr());
+            if !p.is_null() {
+                return p;
+            }
+            // 核心 1.x 函数不在扩展导出里,走 opengl32.dll 导出喵
+            let module = windows_sys::Win32::System::LibraryLoader::GetModuleHandleA(
+                b"opengl32.dll\0".as_ptr(),
+            );
+            if module.is_null() {
+                null_mut()
+            } else {
+                windows_sys::Win32::System::LibraryLoader::GetProcAddress(
+                    module,
+                    cname.as_ptr() as *const u8,
+                )
+                .map(|f| f as *const std::ffi::c_void)
+                .unwrap_or(null_mut())
+            }
+        }
+    }
+
+    fn make_current(&self) -> bool {
+        unsafe { wglMakeCurrent(self.hdc as *mut std::ffi::c_void, self.hglrc) != 0 }
+    }
+
+    fn valid(&self) -> bool {
+        !self.hglrc.is_null()
+    }
+}
+
+impl Drop for WinGpuContext {
+    fn drop(&mut self) {
+        unsafe {
+            wglMakeCurrent(null_mut(), null_mut());
+            wglDeleteContext(self.hglrc);
+            windows_sys::Win32::Graphics::Gdi::ReleaseDC(self.hwnd as HWND, self.hdc);
+            windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(self.hwnd as HWND);
+        }
+    }
+}
+
+/// 创建 WGL GPU 上下文喵(隐藏窗口 + 像素格式 + GL 上下文并 make current)喵
+fn create_gpu_context_impl() -> Option<Box<dyn GpuContext>> {
+    use windows_sys::Win32::Graphics::Gdi::{GetDC, ReleaseDC};
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WS_POPUP};
+
+    CLASS_ONCE.call_once(|| register_class());
+
+    unsafe {
+        // 隐藏 1×1 窗口承载 GL 上下文喵(不出现在任务栏/屏幕)喵
+        let hwnd = CreateWindowExW(
+            0,
+            CLASS_NAME.as_ptr(),
+            CLASS_NAME.as_ptr(),
+            WS_POPUP,
+            0,
+            0,
+            1,
+            1,
+            null_mut(),
+            null_mut(),
+            GetModuleHandleW(null_mut()),
+            null_mut(),
+        );
+        if hwnd.is_null() {
+            log::error!("GPU: 隐藏窗口创建失败喵");
+            return None;
+        }
+        let hdc = GetDC(hwnd);
+        if hdc.is_null() {
+            DestroyWindow(hwnd);
+            return None;
+        }
+
+        let mut pfd: PixelFormatDescriptor = zeroed();
+        pfd.n_size = size_of::<PixelFormatDescriptor>() as u16;
+        pfd.n_version = 1;
+        pfd.dw_flags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+        pfd.i_pixel_type = PFD_TYPE_RGBA;
+        let fmt = ChoosePixelFormat(hdc, &pfd);
+        if fmt == 0 || SetPixelFormat(hdc, fmt, &pfd) == 0 {
+            log::warn!("GPU: 像素格式选择/设置失败喵");
+            ReleaseDC(hwnd, hdc);
+            DestroyWindow(hwnd);
+            return None;
+        }
+
+        let hglrc = wglCreateContext(hdc);
+        if hglrc.is_null() {
+            log::warn!("GPU: wglCreateContext 失败喵");
+            ReleaseDC(hwnd, hdc);
+            DestroyWindow(hwnd);
+            return None;
+        }
+        if wglMakeCurrent(hdc, hglrc) == 0 {
+            log::warn!("GPU: wglMakeCurrent 失败喵");
+            wglDeleteContext(hglrc);
+            ReleaseDC(hwnd, hdc);
+            DestroyWindow(hwnd);
+            return None;
+        }
+
+        log::debug!("GPU: WGL 上下文已创建喵");
+        Some(Box::new(WinGpuContext {
+            hwnd: hwnd as usize,
+            hdc,
+            hglrc,
+        }))
+    }
+}
 
 /// 把 BGRA 像素呈现到分层窗口喵(per-pixel alpha)喵
 fn present_impl(hwnd: HWND, width: i32, height: i32, bgra: &[u8]) {

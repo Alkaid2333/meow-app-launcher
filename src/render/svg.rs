@@ -66,6 +66,11 @@ pub fn icon(name: &str) -> &'static SvgIcon {
 }
 
 impl SvgIcon {
+    /// 可绘制元素数量喵(公开便于单测)喵
+    pub fn shapes_len(&self) -> usize {
+        self.shapes.len()
+    }
+
     /// 把图标画到目标矩形内(自动缩放,描边线宽随尺寸)喵
     pub fn draw(&self, canvas: &Canvas, rect: Rect, color: Color) {
         let w = rect.width().max(1.0);
@@ -152,7 +157,8 @@ fn rounded_stroke_path(rect: Rect, r: f32) -> Path {
 // 简易 SVG 解析喵
 // ---------------------------------------------------------------------------
 
-fn parse_svg(xml: &str) -> SvgIcon {
+/// 解析内嵌 SVG 字符串喵(渲染层内部用,公开便于单测)喵
+pub fn parse_svg(xml: &str) -> SvgIcon {
     let lower = xml.to_ascii_lowercase();
     let stroke = lower.contains("fill=\"none\"") || lower.contains("stroke=\"currentcolor\"");
     let mut shapes = Vec::new();
@@ -255,8 +261,8 @@ fn f(s: &str) -> f32 {
     s.trim().parse().unwrap_or(0.0)
 }
 
-/// 把混杂逗号/空格/连字符的数字串拆成 [f32] 喵('-' 属于其后的数字)喵
-fn numbers(s: &str) -> Vec<f32> {
+/// 把混杂逗号/空格/连字符的数字串拆成 [f32] 喵('-' 属于其后的数字;公开便于单测)喵
+pub fn numbers(s: &str) -> Vec<f32> {
     let mut out = Vec::new();
     let mut buf = String::new();
     let mut last_was_num = false;
@@ -324,7 +330,8 @@ fn params_per(cmd: char) -> usize {
     }
 }
 
-fn build_path(d: &str) -> Path {
+/// 解析 SVG path 的 d 属性喵(公开便于单测)喵
+pub fn build_path(d: &str) -> Path {
     let mut b = PathBuilder::new();
     let mut cur = (0.0_f32, 0.0_f32);
     let mut start = cur;
@@ -454,40 +461,3 @@ fn arc_to(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn number_tokenizer_handles_negatives() {
-        assert_eq!(numbers("9,11 12 14 20 6-2-2"), vec![9.0, 11.0, 12.0, 14.0, 20.0, 6.0, -2.0, -2.0]);
-        // 科学计数法保持喵
-        assert!(numbers("1e-2 3").len() >= 2);
-    }
-
-    #[test]
-    fn parse_builtin_icons() {
-        for (_, xml) in ICONS {
-            let icon = parse_svg(xml);
-            assert!(!icon.shapes.is_empty(), "图标应有可绘制元素喵");
-        }
-    }
-
-    #[test]
-    fn path_builds_no_panic() {
-        for (_, xml) in ICONS {
-            if let Some(d) = extract_d(xml) {
-                let p = build_path(&d);
-                assert!(p.bounds().right >= 0.0 || p.bounds().left >= 0.0 || true);
-            }
-        }
-    }
-
-    fn extract_d(xml: &str) -> Option<String> {
-        // 粗取第一个 d="..." 喵
-        let i = xml.find("d=\"")?;
-        let rest = &xml[i + 3..];
-        let j = rest.find('"')?;
-        Some(rest[..j].to_string())
-    }
-}
