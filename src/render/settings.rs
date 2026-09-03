@@ -12,7 +12,7 @@ use crate::render::font::FontCache;
 use crate::render::shape;
 use crate::render::svg;
 use crate::render::theme::SettingsTheme;
-use skia_safe::{BlurStyle, Canvas, Color, MaskFilter, Paint, PaintStyle, Rect};
+use skia_safe::{BlurStyle, Canvas, Color, Data, Image, MaskFilter, Paint, PaintStyle, Rect};
 
 /// 配置窗口宽度(逻辑 px)喵
 pub const SETTINGS_WIDTH: f32 = 760.0;
@@ -22,6 +22,19 @@ pub const SETTINGS_HEIGHT: f32 = 680.0;
 pub const WINDOW_RADIUS: f32 = 12.0;
 /// 侧边栏宽度喵
 pub const SIDEBAR_WIDTH: f32 = 176.0;
+
+/// 应用图标喵(assets/app_icons 里的 128px png,惰性解码缓存一次)喵
+///
+/// 配置 GUI 的品牌徽标用它展示;.ico 仅用于 exe 打包,不在此加载喵。
+fn app_icon() -> Option<&'static Image> {
+    static APP_ICON: std::sync::OnceLock<Option<Image>> = std::sync::OnceLock::new();
+    APP_ICON
+        .get_or_init(|| {
+            let bytes = include_bytes!("../../assets/app_icons/128x128.png");
+            Image::from_encoded(Data::new_copy(bytes))
+        })
+        .as_ref()
+}
 
 /// 页头区高度(标题 + 副标题 + 分隔线)喵
 const HEADER_HEIGHT: f32 = 72.0;
@@ -303,14 +316,25 @@ fn paint_sidebar(
     bg.set_anti_alias(true);
     canvas.draw_rect(sidebar_rect, &bg);
 
-    // 品牌块: 小徽标(内嵌设置齿轮) + 产品全称 + 版本喵
+    // 品牌块: 应用图标(png,裁剪进圆角徽标) + 产品全称 + 版本喵
     let logo = Rect::from_xywh(16.0, 18.0, 30.0, 30.0);
     let logo_path = shape::rounded_rect_path(logo, 8.0);
     let mut lp = Paint::default();
     lp.set_color(theme.accent);
     lp.set_anti_alias(true);
     canvas.draw_path(&logo_path, &lp);
-    svg::icon("settings").draw(canvas, inset_rect(logo, 5.0, 5.0), Color::WHITE);
+    if let Some(icon) = app_icon() {
+        // 图标按圆角徽标裁剪,避免方形图片戳出圆角喵
+        canvas.save();
+        canvas.clip_path(&logo_path, None, Some(false));
+        let mut img_paint = Paint::default();
+        img_paint.set_anti_alias(true);
+        canvas.draw_image_rect(icon, None, logo, &img_paint);
+        canvas.restore();
+    } else {
+        // 图标解码失败时兜底: 内嵌设置齿轮喵
+        svg::icon("settings").draw(canvas, inset_rect(logo, 5.0, 5.0), Color::WHITE);
+    }
 
     let mut tp = Paint::default();
     tp.set_color(theme.text);
