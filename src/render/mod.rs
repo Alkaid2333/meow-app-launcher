@@ -157,6 +157,9 @@ impl Renderer {
         if width == self.width && height == self.height {
             return;
         }
+        if let Some(gpu) = &self.gpu {
+            let _ = gpu.make_current();
+        }
         let rebuilt = if let Some(context) = &mut self.context {
             let info = ImageInfo::new(
                 (width, height),
@@ -190,7 +193,13 @@ impl Renderer {
     }
 
     /// 获取绘制画布喵(Skia Canvas 方法均为 &self,内部可变)喵
+    ///
+    /// GPU 模式下先确保本渲染器的 GL 上下文 current——多窗口共享主线程时,
+    /// 不先 current 会把绘制命令发到别的窗口的上下文,造成内容错乱喵。
     pub fn canvas(&mut self) -> &Canvas {
+        if let Some(gpu) = &self.gpu {
+            let _ = gpu.make_current();
+        }
         self.surface.canvas()
     }
 
@@ -236,6 +245,18 @@ impl Renderer {
             )
         } else {
             self.surface.read_pixels(&info, out, row_bytes, (0, 0))
+        }
+    }
+}
+
+/// GPU 资源释放前先确保上下文 current 喵
+///
+/// Skia Surface/DirectContext 析构会下发 GL 删除命令,必须在所属 GL 上下文
+/// current 时进行;否则命令落到别的/无上下文,轻则错乱,重则 GPU 卡死喵。
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        if let Some(gpu) = &self.gpu {
+            let _ = gpu.make_current();
         }
     }
 }

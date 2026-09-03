@@ -443,10 +443,12 @@ fn draw_grid_item(
         canvas.draw_path(&bg_path, &sel);
     }
 
-    let icon_size = layout.icon_size.min(rect.height() * 0.42).max(24.0);
+    // 图标居中于单元上段,尺寸上限 0.38 倍高,保证图标完全落在聚焦框内喵
+    let icon_size = layout.icon_size.min(rect.height() * 0.38).max(24.0);
+    let icon_cy = rect.top + rect.height() * 0.20;
     let icon_rect = Rect::from_xywh(
         rect.center_x() - icon_size / 2.0,
-        rect.top + rect.height() * 0.16 - icon_size / 2.0,
+        icon_cy - icon_size / 2.0,
         icon_size,
         icon_size,
     );
