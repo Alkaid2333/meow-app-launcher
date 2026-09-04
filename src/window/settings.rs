@@ -990,6 +990,7 @@ impl SettingsWindow {
     }
 
     fn drop_files(&mut self, paths: Vec<String>) {
+        let mut added = 0usize;
         for path in paths {
             let p = std::path::Path::new(&path);
             let ext = p
@@ -1006,9 +1007,18 @@ impl SettingsWindow {
                 .and_then(|n| n.to_str())
                 .unwrap_or("未命名应用")
                 .to_string();
-            self.state.borrow_mut().register_app(&name, &path, None);
+            if self.state.borrow_mut().register_app(&name, &path, None) {
+                added += 1;
+            }
+            log::info!("拖入注册应用: {name} ({path}) 喵");
         }
-        self.render();
+        if added > 0 {
+            // 跳到「应用」页(索引 3)给用户可见反馈喵
+            self.current_page = 3;
+            self.scroll = 0.0;
+            self.render();
+            log::info!("拖入注册完成,新增 {added} 个应用喵");
+        }
     }
 
     /// 心跳喵: 检查显示请求并渲染喵

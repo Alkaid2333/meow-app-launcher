@@ -3,7 +3,7 @@
 //! `meowal register <名称> <路径> [-ico 图标]` 喵。
 //! 独立成模块,便于放在 `tests/` 里做单元测试喵。
 
-use crate::app::config::DATA_DIR_NAME;
+use crate::app::config;
 use crate::apps::{AppInfo, AppRegistry};
 
 /// `meowal register <名称> <路径> [-ico 图标]` 喵
@@ -13,9 +13,8 @@ pub fn cli_register(args: &[String]) {
     #[cfg(target_os = "windows")]
     attach_parent_console();
 
-    let data_dir = std::env::current_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("."))
-        .join(DATA_DIR_NAME);
+    // 数据目录固定为 exe 同目录的 .datas(与 GUI 一致,不随终端 CWD 漂移)喵
+    let data_dir = config::data_dir();
     let _ = std::fs::create_dir_all(&data_dir);
 
     let parsed = parse_register_args(args);

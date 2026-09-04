@@ -13,6 +13,18 @@ pub const CONFIG_FILE_NAME: &str = "config.json";
 /// 应用注册文件路径(相对数据目录)喵
 pub const APPS_FILE_NAME: &str = "apps.json";
 
+/// 计算数据目录喵(便携式: 固定在可执行文件同目录的 `.datas` 下)喵
+///
+/// 不能依赖 `current_dir()`——从终端跑 `meowal register` 时 CWD 是终端目录,
+/// 与 GUI 启动时的 CWD 不一致会导致注册到不同的 .datas,指令注册「无效」喵。
+pub fn data_dir() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(DATA_DIR_NAME)
+}
+
 /// 主题预设喵: 材质与配色融合成一体,三档均为浅色,
 /// 文字色与底材成对出现,任何预设下对比度都有保证喵。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
