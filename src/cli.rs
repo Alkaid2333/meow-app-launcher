@@ -8,6 +8,11 @@ use crate::apps::{AppInfo, AppRegistry};
 
 /// `meowal register <名称> <路径> [-ico 图标]` 喵
 pub fn cli_register(args: &[String]) {
+    // release 是 Windows 子系统(无控制台),从终端调用时先附加父控制台,
+    // 让 println/eprintln 输出可见喵。
+    #[cfg(target_os = "windows")]
+    attach_parent_console();
+
     let data_dir = std::env::current_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("."))
         .join(DATA_DIR_NAME);
@@ -28,6 +33,42 @@ pub fn cli_register(args: &[String]) {
     registry.upsert(app_info);
     registry.save(&data_dir);
     println!("已注册: {name} → {path}");
+}
+
+/// 附加到父进程控制台并重绑 stdout/stderr 喵(仅 Windows,release 无控制台时生效)喵
+///
+/// GUI 双击启动时没有父控制台,AttachConsole 失败即静默返回,不打扰喵。
+#[cfg(target_os = "windows")]
+fn attach_parent_console() {
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Console::{
+        AttachConsole, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    use std::ptr::null_mut;
+
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            // 无父控制台(如双击启动),无需处理喵
+            return;
+        }
+        let con = CreateFileW(
+            "CONOUT$\0".encode_utf16().collect::<Vec<_>>().as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            null_mut(),
+        );
+        if con != INVALID_HANDLE_VALUE {
+            // Rust 的 stdout/stderr 每次访问都会重新 GetStdHandle,重绑后输出即可见喵
+            SetStdHandle(STD_OUTPUT_HANDLE, con);
+            SetStdHandle(STD_ERROR_HANDLE, con);
+        }
+    }
 }
 
 /// 解析注册命令参数喵:`<名称> <路径> [-ico 图标]` 喵

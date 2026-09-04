@@ -1458,7 +1458,12 @@ fn hotkey_message_loop(
         lpszClassName: class_name.as_ptr(),
         ..unsafe { zeroed() }
     };
-    if unsafe { RegisterClassW(&wc) } == 0 {
+    // 窗口类是进程级注册: 重新录制热键会再起一个线程,类已存在时属正常,忽略喵
+    let rc = unsafe { RegisterClassW(&wc) };
+    let already_exists = rc == 0
+        && unsafe { windows_sys::Win32::Foundation::GetLastError() }
+            == windows_sys::Win32::Foundation::ERROR_CLASS_ALREADY_EXISTS;
+    if rc == 0 && !already_exists {
         log::error!("隐藏窗口类注册失败喵");
         return;
     }
@@ -1485,9 +1490,19 @@ fn hotkey_message_loop(
     }
     *hwnd_holder.lock().unwrap() = Some(hwnd as usize);
 
-    if unsafe { RegisterHotKey(hwnd, HOTKEY_ID, mods, vk) } == 0 {
+    // 旧热键线程可能还没释放同组合,轻微重试(上限 ~200ms),避免「改完不生效」喵
+    let mut registered = false;
+    for _ in 0..20 {
+        if unsafe { RegisterHotKey(hwnd, HOTKEY_ID, mods, vk) } != 0 {
+            registered = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if !registered {
         log::error!("RegisterHotKey 失败(可能被其他程序占用)喵");
         unsafe { DestroyWindow(hwnd) };
+        *hwnd_holder.lock().unwrap() = None;
         return;
     }
 
