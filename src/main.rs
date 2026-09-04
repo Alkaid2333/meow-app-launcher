@@ -19,7 +19,6 @@ use meow_app_launcher::utils;
 use meow_app_launcher::window::{Launcher, SettingsWindow, Tray};
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::rc::Rc;
 
 fn main() {
@@ -29,10 +28,8 @@ fn main() {
         return;
     }
 
-    // 数据目录: ./.datas 喵
-    let data_dir = std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(config::DATA_DIR_NAME);
+    // 数据目录喵(便携式,固定在 exe 同目录的 .datas,与 CLI register 保持一致)喵
+    let data_dir = config::data_dir();
 
     // 日志喵(MEOWAL_VERBOSE=1 开启 debug 日志)喵
     utils::logger::init(&data_dir, std::env::var("MEOWAL_VERBOSE").is_ok());
@@ -42,7 +39,14 @@ fn main() {
     let state: SharedState = Rc::new(RefCell::new(AppState::new(platform.clone(), data_dir)));
     let commands = Rc::new(RefCell::new(VecDeque::new()));
 
-    // 0. 同步开机自启状态喵(配置开启时确保注册表一致,路径变更也能自动修复)喵
+    // 0. 让 `meowal` 命令在终端可用(各平台自行实现;失败不阻断主流程)喵
+    if platform.install_cli_command() {
+        log::info!("meowal 命令已就绪(可作终端命令使用)喵");
+    } else {
+        log::warn!("meowal 命令注册失败,不影响应用运行喵~");
+    }
+
+    // 1. 同步开机自启状态喵(配置开启时确保注册表一致,路径变更也能自动修复)喵
     if state.borrow().config.auto_start {
         let ok = platform.set_auto_start(true);
         log::info!("启动时同步开机自启: 成功={ok} 喵");

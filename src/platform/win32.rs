@@ -166,6 +166,10 @@ impl Platform for Win32Platform {
         set_auto_start_impl(enabled)
     }
 
+    fn install_cli_command(&self) -> bool {
+        install_cli_command_impl()
+    }
+
     fn create_window(&self, spec: &WindowSpec) -> Option<PlatformWindow> {
         // 确保窗口类已注册喵
         CLASS_ONCE.call_once(|| {
@@ -848,7 +852,9 @@ fn collect_dropped_files(wparam: WPARAM) -> Vec<String> {
     let hdrop = wparam as HDROP;
     let mut paths = Vec::new();
     unsafe {
-        let count = DragQueryFileW(hdrop, 0xFFFF, null_mut(), 0);
+        // 查文件数必须用哨兵值 0xFFFFFFFF(= -1),写成 0xFFFF(65535) 会被当成文件索引,
+        // 返回 0 → 拖入永远没反应喵。
+        let count = DragQueryFileW(hdrop, u32::MAX, null_mut(), 0);
         for i in 0..count {
             let len = DragQueryFileW(hdrop, i, null_mut(), 0) as usize;
             if len == 0 {
@@ -1015,6 +1021,122 @@ fn set_auto_start_impl(enabled: bool) -> bool {
         let _ = RegCloseKey(key);
         ok
     }
+}
+
+/// 把可执行文件目录加入用户 PATH 喵(让 `meowal` 在终端可用)喵
+///
+/// 写入 `HKCU\Environment\Path`(保留原 REG_EXPAND_SZ 类型与既有条目),
+/// 已存在则幂等跳过;成功后广播 WM_SETTINGCHANGE 让已开终端生效喵。
+fn install_cli_command_impl() -> bool {
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+        KEY_READ, KEY_SET_VALUE, REG_EXPAND_SZ,
+    };
+
+    const ENV_KEY: &str = "Environment";
+    const VALUE: &str = "Path";
+
+    let Ok(exe) = std::env::current_exe() else {
+        log::error!("CLI 注册: 无法获取当前可执行路径喵");
+        return false;
+    };
+    let Some(exe_dir) = exe.parent().map(|d| d.to_string_lossy().to_string()) else {
+        return false;
+    };
+
+    let key_wide: Vec<u16> = ENV_KEY.encode_utf16().chain(Some(0)).collect();
+    let value_wide: Vec<u16> = VALUE.encode_utf16().chain(Some(0)).collect();
+
+    unsafe {
+        let mut key: HKEY = null_mut();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, key_wide.as_ptr(), 0, KEY_READ | KEY_SET_VALUE, &mut key) != 0 {
+            log::error!("CLI 注册: 无法打开 HKCU\\{ENV_KEY} 喵");
+            return false;
+        }
+
+        // 读现有 Path(记录类型,保留 REG_EXPAND_SZ 语义)喵
+        let mut path_type: u32 = REG_EXPAND_SZ;
+        let mut size: u32 = 0;
+        let mut buf: Vec<u16> = Vec::new();
+        let exists = RegQueryValueExW(key, value_wide.as_ptr(), null_mut(), &mut path_type, null_mut(), &mut size) == 0
+            && size > 0;
+        if exists {
+            buf.resize((size as usize) / 2 + 1, 0);
+            let mut tmp = size;
+            if RegQueryValueExW(
+                key,
+                value_wide.as_ptr(),
+                null_mut(),
+                &mut path_type,
+                buf.as_mut_ptr() as *mut u8,
+                &mut tmp,
+            ) != 0
+            {
+                buf.clear();
+            }
+            while buf.last() == Some(&0) {
+                buf.pop();
+            }
+        }
+
+        // 已包含则幂等成功喵(条目以 ; 分隔,大小写不敏感)喵
+        let existing = String::from_utf16_lossy(&buf);
+        if existing.split(';').any(|e| e.eq_ignore_ascii_case(&exe_dir)) {
+            let _ = RegCloseKey(key);
+            log::debug!("CLI 已在用户 PATH 中喵");
+            return true;
+        }
+
+        // 追加可执行目录喵
+        let mut new_path = existing;
+        if !new_path.is_empty() && !new_path.ends_with(';') {
+            new_path.push(';');
+        }
+        new_path.push_str(&exe_dir);
+        let data: Vec<u16> = new_path.encode_utf16().chain(Some(0)).collect();
+        let rc = RegSetValueExW(
+            key,
+            value_wide.as_ptr(),
+            0,
+            if exists { path_type } else { REG_EXPAND_SZ },
+            data.as_ptr() as *const u8,
+            (data.len() * 2) as u32,
+        );
+        let _ = RegCloseKey(key);
+        if rc != 0 {
+            log::error!("CLI 注册: 写入 PATH 失败(rc={rc})喵");
+            return false;
+        }
+
+        broadcast_environment_change();
+        log::info!("CLI 已加入用户 PATH: {exe_dir} 喵");
+        true
+    }
+}
+
+/// 广播环境变量变更,让已打开的终端/资源管理器识别新 PATH 喵
+///
+/// HWND_BROADCAST 会遍历所有顶层窗口,可能耗时,故放独立线程 + 短超时,
+/// 绝不阻塞应用启动喵。
+fn broadcast_environment_change() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE,
+    };
+    std::thread::Builder::new()
+        .name("meow-env-broadcast".into())
+        .spawn(move || unsafe {
+            let env: Vec<u16> = "Environment\0".encode_utf16().collect();
+            SendMessageTimeoutW(
+                HWND_BROADCAST,
+                WM_SETTINGCHANGE,
+                0,
+                env.as_ptr() as isize,
+                SMTO_ABORTIFHUNG,
+                200,
+                null_mut(),
+            );
+        })
+        .ok();
 }
 
 // ---------------------------------------------------------------------------

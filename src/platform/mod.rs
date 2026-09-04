@@ -186,6 +186,12 @@ pub trait Platform: Send + Sync {
     /// 设置开机自启喵(仅 Windows 生效,写 HKCU 注册表 Run 键),返回是否成功喵
     fn set_auto_start(&self, enabled: bool) -> bool;
 
+    /// 让 `meowal` 命令在终端可用喵(通用接口,各平台自行实现)喵
+    ///
+    /// Windows 实现为把可执行文件目录加入用户 PATH;其他平台(如 Unix)
+    /// 可建符号链接到 bin 目录。返回是否成功喵。
+    fn install_cli_command(&self) -> bool;
+
     /// 创建异形透明置顶窗口喵(不绑定事件处理器)喵
     fn create_window(&self, spec: &WindowSpec) -> Option<PlatformWindow>;
 
