@@ -68,6 +68,10 @@ pub struct SettingsWindow {
     filter_edit: Option<(usize, TextEdit)>,
     /// 正在编辑的标签行(文本缓冲)喵
     tag_edit: Option<TextEdit>,
+    /// 正在编辑的指令别名行(下标 + 文本缓冲)喵
+    command_edit: Option<(usize, TextEdit)>,
+    /// 正在编辑的自定义浏览器输入(文本缓冲)喵
+    browser_edit: Option<TextEdit>,
     /// 正在拖选文本的输入框喵
     text_drag: Option<TextDrag>,
     /// 是否正在录制全局热键喵
@@ -144,6 +148,8 @@ impl SettingsWindow {
             selected_app: None,
             stepper_edit: None,
             filter_edit: None,
+            command_edit: None,
+            browser_edit: None,
             tag_edit: None,
             text_drag: None,
             hotkey_capture: false,
@@ -214,6 +220,8 @@ impl SettingsWindow {
         let edit = EditFocus {
             stepper: self.stepper_edit.as_ref().map(|(id, te)| (*id, te)),
             filter: self.filter_edit.as_ref().map(|(i, te)| (*i, te)),
+            command: self.command_edit.as_ref().map(|(i, te)| (*i, te)),
+            browser: self.browser_edit.as_ref(),
             tag: self.tag_edit.as_ref(),
         };
         let layout = paint_settings(
@@ -284,6 +292,8 @@ impl SettingsWindow {
                 // 文本框: 需要矩形做光标命中与拖选,提前拦截喵
                 RowHit::StepperEdit(id) => self.click_stepper_box(rect, id, lx),
                 RowHit::FilterInput(i) => self.click_filter_box(rect, i, lx),
+                RowHit::CommandAlias(i) => self.click_command_box(rect, i, lx),
+                RowHit::Input(id) if id == RowId::WebBrowser => self.click_browser_box(rect, lx),
                 RowHit::Input(_) => self.click_tag_box(rect, lx),
                 _ => self.apply_hit(hit),
             }
@@ -315,6 +325,8 @@ impl SettingsWindow {
             self.stepper_edit = Some((id, te));
         }
         self.filter_edit = None;
+        self.command_edit = None;
+        self.browser_edit = None;
         self.tag_edit = None;
         self.text_drag = Some(TextDrag { rect: box_rect });
         log::debug!("数值框聚焦: {id:?} 喵");
@@ -345,6 +357,8 @@ impl SettingsWindow {
             self.filter_edit = Some((index, te));
         }
         self.stepper_edit = None;
+        self.command_edit = None;
+        self.browser_edit = None;
         self.tag_edit = None;
         self.text_drag = Some(TextDrag { rect: box_rect });
         log::debug!("过滤关键词框聚焦: 规则 {index} 喵");
@@ -363,6 +377,8 @@ impl SettingsWindow {
         }
         self.stepper_edit = None;
         self.filter_edit = None;
+        self.command_edit = None;
+        self.browser_edit = None;
         self.text_drag = Some(TextDrag { rect: box_rect });
         self.render();
     }
@@ -453,6 +469,8 @@ impl SettingsWindow {
                 self.scroll = 0.0;
                 self.stepper_edit = None;
                 self.filter_edit = None;
+                self.command_edit = None;
+                self.browser_edit = None;
                 self.tag_edit = None;
                 self.text_drag = None;
                 self.hotkey_capture = false;
@@ -468,11 +486,14 @@ impl SettingsWindow {
             RowHit::Chip(i) => self.remove_chip(i),
             RowHit::FilterCase(i) => self.toggle_filter_case(i),
             RowHit::FilterDelete(i) => self.delete_filter(i),
+            RowHit::CommandKind(i) => self.cycle_command_kind(i),
+            RowHit::CommandDelete(i) => self.delete_command(i),
             // 窗口栏/手柄与文本框在 handle_click 里先行拦截,这里仅收尾喵
             RowHit::TitleBar
             | RowHit::ResizeGrip
             | RowHit::StepperEdit(_)
             | RowHit::FilterInput(_)
+            | RowHit::CommandAlias(_)
             | RowHit::Input(_) => {}
         }
         self.render();
@@ -525,6 +546,136 @@ impl SettingsWindow {
             log::info!("过滤规则 {index} 已删除,剩余 {} 条喵", state.config.search.filters.len());
         }
         self.filter_edit = None;
+    }
+
+    /// 点击指令别名输入框喵
+    fn click_command_box(&mut self, box_rect: Rect, index: usize, lx: f32) {
+        let paint = self.box_paint();
+        let font = self.fonts.font(12.0);
+        let aliases = self
+            .state
+            .borrow()
+            .config
+            .search
+            .commands
+            .get(index)
+            .map(|c| c.aliases.join(", "))
+            .unwrap_or_default();
+        if matches!(&self.command_edit, Some((i, _)) if *i == index) {
+            if let Some((_, te)) = self.command_edit.as_mut() {
+                let caret = caret_from_x(&font, &paint, &te.text, box_rect.left + 8.0, lx);
+                te.begin_select(caret);
+            }
+        } else {
+            let mut te = TextEdit::new(aliases);
+            te.select_all();
+            self.command_edit = Some((index, te));
+        }
+        self.stepper_edit = None;
+        self.filter_edit = None;
+        self.browser_edit = None;
+        self.tag_edit = None;
+        self.text_drag = Some(TextDrag { rect: box_rect });
+        log::debug!("指令别名框聚焦: 指令 {index} 喵");
+        self.render();
+    }
+
+    /// 提交指令别名缓冲喵(逗号/空格分隔,保序去重)喵
+    fn commit_command_edit(&mut self) {
+        let Some((index, te)) = self.command_edit.take() else {
+            return;
+        };
+        let mut state = self.state.borrow_mut();
+        // 逗号(中英文)/空格均可作分隔符喵
+        let mut aliases: Vec<String> = Vec::new();
+        for part in te.text.split(|c: char| c == ',' || c == '\u{ff0c}' || c.is_whitespace()) {
+            let part = part.trim();
+            if !part.is_empty() && !aliases.iter().any(|a: &String| a.eq_ignore_ascii_case(part)) {
+                aliases.push(part.to_string());
+            }
+        }
+        let mut changed = false;
+        if let Some(entry) = state.config.search.commands.get_mut(index)
+            && entry.aliases != aliases
+        {
+            entry.aliases = aliases;
+            changed = true;
+        }
+        if changed {
+            state.persist();
+            log::info!("指令 {index} 别名已更新喵~");
+        }
+    }
+
+    /// 切换指令的系统命令类型喵
+    fn cycle_command_kind(&mut self, index: usize) {
+        use crate::platform::SystemCommandKind as K;
+        let mut state = self.state.borrow_mut();
+        // 借用收在块内,取好展示名再持久化喵
+        let title = {
+            let Some(entry) = state.config.search.commands.get_mut(index) else {
+                return;
+            };
+            entry.kind = match entry.kind {
+                K::Lock => K::Sleep,
+                K::Sleep => K::Shutdown,
+                K::Shutdown => K::Restart,
+                K::Restart => K::Lock,
+            };
+            entry.kind.title()
+        };
+        state.persist();
+        log::info!("指令 {index} 类型 → {title} 喵");
+        self.command_edit = None;
+    }
+
+    /// 删除指令喵
+    fn delete_command(&mut self, index: usize) {
+        let mut state = self.state.borrow_mut();
+        if index < state.config.search.commands.len() {
+            state.config.search.commands.remove(index);
+            state.persist();
+            log::info!("指令 {index} 已删除,剩余 {} 条喵", state.config.search.commands.len());
+        }
+        self.command_edit = None;
+    }
+
+    /// 点击自定义浏览器输入框喵
+    fn click_browser_box(&mut self, box_rect: Rect, lx: f32) {
+        let paint = self.box_paint();
+        let font = self.fonts.font(12.0);
+        let current = self.state.borrow().config.search.web_browser.clone();
+        if self.browser_edit.is_some() {
+            if let Some(te) = self.browser_edit.as_mut() {
+                let caret = caret_from_x(&font, &paint, &te.text, box_rect.left + 8.0, lx);
+                te.begin_select(caret);
+            }
+        } else {
+            let mut te = TextEdit::new(current);
+            te.select_all();
+            self.browser_edit = Some(te);
+        }
+        self.stepper_edit = None;
+        self.filter_edit = None;
+        self.command_edit = None;
+        self.tag_edit = None;
+        self.text_drag = Some(TextDrag { rect: box_rect });
+        log::debug!("自定义浏览器框聚焦喵");
+        self.render();
+    }
+
+    /// 提交自定义浏览器缓冲喵(空串 = 回到系统默认)喵
+    fn commit_browser_edit(&mut self) {
+        let Some(te) = self.browser_edit.take() else {
+            return;
+        };
+        let mut state = self.state.borrow_mut();
+        let value = te.text.trim().to_string();
+        if state.config.search.web_browser != value {
+            state.config.search.web_browser = value;
+            state.persist();
+            log::info!("自定义浏览器已更新喵~");
+        }
     }
 
     /// 恢复单个配置项到默认值喵
@@ -740,6 +891,8 @@ impl SettingsWindow {
                 self.recreate_renderer();
                 self.stepper_edit = None;
                 self.filter_edit = None;
+                self.command_edit = None;
+                self.browser_edit = None;
                 self.tag_edit = None;
                 self.text_drag = None;
                 self.hotkey_capture = false;
@@ -801,6 +954,39 @@ impl SettingsWindow {
                 self.stepper_edit = None;
                 self.tag_edit = None;
                 self.filter_edit = Some((count - 1, TextEdit::default()));
+            }
+            RowId::WebEngine => {
+                use crate::app::config::WebEngine;
+                let mut state = self.state.borrow_mut();
+                state.config.search.web_engine = match state.config.search.web_engine {
+                    WebEngine::Baidu => WebEngine::Bing,
+                    WebEngine::Bing => WebEngine::Sogou,
+                    WebEngine::Sogou => WebEngine::Google,
+                    WebEngine::Google => WebEngine::Duckduckgo,
+                    WebEngine::Duckduckgo => WebEngine::Baidu,
+                };
+                state.persist();
+                log::info!("搜索引擎 → {} 喵", state.config.search.web_engine.label());
+            }
+            RowId::CommandAdd => {
+                let mut state = self.state.borrow_mut();
+                state
+                    .config
+                    .search
+                    .commands
+                    .push(crate::app::config::CommandEntry {
+                        aliases: Vec::new(),
+                        kind: crate::platform::SystemCommandKind::Lock,
+                    });
+                let count = state.config.search.commands.len();
+                state.persist();
+                log::info!("添加指令行,共 {count} 条喵");
+                // 自动进入新一行的编辑喵
+                self.stepper_edit = None;
+                self.tag_edit = None;
+                self.filter_edit = None;
+                self.browser_edit = None;
+                self.command_edit = Some((count - 1, TextEdit::default()));
             }
             _ => {}
         }
@@ -868,6 +1054,10 @@ impl SettingsWindow {
                     te.backspace();
                 } else if let Some((_, te)) = &mut self.filter_edit {
                     te.backspace();
+                } else if let Some((_, te)) = &mut self.command_edit {
+                    te.backspace();
+                } else if let Some(te) = &mut self.browser_edit {
+                    te.backspace();
                 } else if let Some(te) = &mut self.tag_edit {
                     te.backspace();
                 }
@@ -878,6 +1068,10 @@ impl SettingsWindow {
                 if let Some((_, te)) = &mut self.stepper_edit {
                     te.delete();
                 } else if let Some((_, te)) = &mut self.filter_edit {
+                    te.delete();
+                } else if let Some((_, te)) = &mut self.command_edit {
+                    te.delete();
+                } else if let Some(te) = &mut self.browser_edit {
                     te.delete();
                 } else if let Some(te) = &mut self.tag_edit {
                     te.delete();
@@ -893,6 +1087,8 @@ impl SettingsWindow {
             crate::platform::Key::Escape => {
                 self.stepper_edit = None;
                 self.filter_edit = None;
+                self.command_edit = None;
+                self.browser_edit = None;
                 self.tag_edit = None;
                 self.render();
                 true
@@ -907,6 +1103,18 @@ impl SettingsWindow {
         }
         // 过滤关键词编辑喵
         if let Some((_, te)) = &mut self.filter_edit {
+            te.insert_char(ch);
+            self.render();
+            return;
+        }
+        // 指令别名编辑喵
+        if let Some((_, te)) = &mut self.command_edit {
+            te.insert_char(ch);
+            self.render();
+            return;
+        }
+        // 自定义浏览器编辑喵
+        if let Some(te) = &mut self.browser_edit {
             te.insert_char(ch);
             self.render();
             return;
@@ -932,6 +1140,14 @@ impl SettingsWindow {
         // 三个文本输入框共用编辑按键逻辑,按优先级处理提交喵
         if self.filter_edit.is_some() {
             self.edit_key(key, &mut |w| w.commit_filter_edit());
+            return;
+        }
+        if self.command_edit.is_some() {
+            self.edit_key(key, &mut |w| w.commit_command_edit());
+            return;
+        }
+        if self.browser_edit.is_some() {
+            self.edit_key(key, &mut |w| w.commit_browser_edit());
             return;
         }
         if self.stepper_edit.is_some() {
@@ -1351,6 +1567,7 @@ fn build_pages(
         id: RowId::TagInput,
         label: "给选中应用加 Tag".into(),
         value: String::new(),
+        placeholder: "输入后回车喵".into(),
     }];
     if let Some(name) = selected
         && let Some(app) = apps.iter().find(|a| a.name == name)
@@ -1460,6 +1677,39 @@ fn build_pages(
                             format!("结果排版 · {}", app_layout_label(config.window.layout)),
                         ),
                     ],
+                },
+                SettingsGroup {
+                    title: "Web 搜索".into(),
+                    rows: vec![
+                        SettingsRow::Input {
+                            id: RowId::WebBrowser,
+                            label: "自定义浏览器".into(),
+                            value: config.search.web_browser.clone(),
+                            placeholder: "留空用系统默认;可含 %1 占位喵".into(),
+                        },
+                        btn(
+                            RowId::WebEngine,
+                            format!("搜索引擎 · {}", config.search.web_engine.label()),
+                        ),
+                    ],
+                },
+                SettingsGroup {
+                    title: "指令模块".into(),
+                    rows: {
+                        let mut rows: Vec<SettingsRow> = config
+                            .search
+                            .commands
+                            .iter()
+                            .enumerate()
+                            .map(|(i, c)| SettingsRow::Command {
+                                index: i,
+                                kind: c.kind,
+                                aliases: c.aliases.join(", "),
+                            })
+                            .collect();
+                        rows.push(btn(RowId::CommandAdd, "添加指令".into()));
+                        rows
+                    },
                 },
                 SettingsGroup {
                     title: "维护".into(),

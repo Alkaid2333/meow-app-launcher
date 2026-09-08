@@ -117,12 +117,20 @@ pub enum SettingsRow {
         id: RowId,
         label: String,
         value: String,
+        /// 空值时的提示文案喵
+        placeholder: String,
     },
     /// 过滤关键词行喵(index 对应配置里的过滤规则下标)喵
     Filter {
         index: usize,
         keyword: String,
         case_sensitive: bool,
+    },
+    /// 系统指令行喵(index 对应配置 commands 下标;aliases 为逗号连接的展示串)喵
+    Command {
+        index: usize,
+        kind: crate::platform::SystemCommandKind,
+        aliases: String,
     },
 }
 
@@ -161,6 +169,12 @@ pub enum RowHit {
     FilterCase(usize),
     /// 删除过滤关键词(规则下标)喵
     FilterDelete(usize),
+    /// 切换指令的系统命令类型(下标)喵
+    CommandKind(usize),
+    /// 指令别名输入框(下标)喵
+    CommandAlias(usize),
+    /// 删除指令(下标)喵
+    CommandDelete(usize),
     /// 恢复该项默认值喵
     Restore(RowId),
 }
@@ -210,6 +224,18 @@ pub enum RowId {
     TagInput,
     /// 添加一条过滤关键词规则喵
     FilterAdd,
+    /// Web 搜索引擎切换喵
+    WebEngine,
+    /// 自定义浏览器输入喵
+    WebBrowser,
+    /// 添加一条系统指令喵
+    CommandAdd,
+    /// 切换指令的系统命令类型喵
+    CommandKind(usize),
+    /// 编辑指令别名喵
+    CommandAlias(usize),
+    /// 删除指令喵
+    CommandDelete(usize),
     SpringDuration(u8),
     SpringBounce(u8),
 }
@@ -230,6 +256,10 @@ pub struct EditFocus<'a> {
     pub stepper: Option<(RowId, &'a TextEdit)>,
     /// 正在编辑的过滤关键词行(规则下标)喵
     pub filter: Option<(usize, &'a TextEdit)>,
+    /// 正在编辑的指令别名行(下标)喵
+    pub command: Option<(usize, &'a TextEdit)>,
+    /// 正在编辑的自定义浏览器输入喵
+    pub browser: Option<&'a TextEdit>,
     /// 正在编辑的标签行喵
     pub tag: Option<&'a TextEdit>,
 }
@@ -778,7 +808,7 @@ fn paint_row(
             hits.push((screen_hit(chip, scroll), RowHit::Chip(*chip_i)));
             *chip_i += 1;
         }
-        SettingsRow::Input { id, label, value } => {
+        SettingsRow::Input { id, label, value, placeholder } => {
             draw_row_label(canvas, theme, fonts, label, rect, 240.0, 0.0);
             let box_rect = Rect::from_xywh(rect.right - 220.0, rect.center_y() - 14.0, 220.0, 28.0);
             let path = shape::rounded_rect_path(box_rect, CTRL_RADIUS);
@@ -786,14 +816,19 @@ fn paint_row(
             bg.set_color(theme.control_bg);
             bg.set_anti_alias(true);
             canvas.draw_path(&path, &bg);
-            let editing = edit.tag.is_some();
+            // 浏览器行用独立编辑槽,标签行沿用 tag 槽喵
+            let (editing, draft) = if *id == RowId::WebBrowser {
+                (edit.browser.is_some(), edit.browser)
+            } else {
+                (edit.tag.is_some(), edit.tag)
+            };
             let mut border = Paint::default();
             border.set_color(if editing { theme.accent } else { theme.control_border });
             border.set_anti_alias(true);
             border.set_style(PaintStyle::Stroke);
             border.set_stroke_width(if editing { 1.5 } else { 1.0 });
             canvas.draw_path(&path, &border);
-            match edit.tag {
+            match draft {
                 Some(te) => draw_text_edit(
                     canvas,
                     box_rect,
@@ -804,7 +839,7 @@ fn paint_row(
                     Some(te),
                 ),
                 None => {
-                    let shown = if value.is_empty() { "输入后回车喵" } else { value };
+                    let shown = if value.is_empty() { placeholder.as_str() } else { value };
                     let mut p = Paint::default();
                     p.set_color(if value.is_empty() { theme.text_dim } else { theme.text });
                     p.set_anti_alias(true);
@@ -898,6 +933,86 @@ fn paint_row(
             canvas.draw_path(&del_path, &dbr);
             icon::draw_builtin(canvas, del_rect, "close", theme.text);
             hits.push((screen_hit(del_rect, scroll), RowHit::FilterDelete(*index)));
+        }
+        SettingsRow::Command { index, kind, aliases } => {
+            // 指令行: 左侧别名输入框 + 中部命令类型按钮 + 右侧删除按钮喵
+            let input_rect = Rect::from_xywh(
+                rect.left,
+                rect.center_y() - 14.0,
+                (rect.width() - 178.0).max(120.0),
+                28.0,
+            );
+            let input_path = shape::rounded_rect_path(input_rect, CTRL_RADIUS);
+            let mut ibg = Paint::default();
+            ibg.set_color(theme.control_bg);
+            ibg.set_anti_alias(true);
+            canvas.draw_path(&input_path, &ibg);
+            let editing = edit.command.is_some_and(|(i, _)| i == *index);
+            let mut iborder = Paint::default();
+            iborder.set_color(if editing { theme.accent } else { theme.control_border });
+            iborder.set_anti_alias(true);
+            iborder.set_style(PaintStyle::Stroke);
+            iborder.set_stroke_width(if editing { 1.5 } else { 1.0 });
+            canvas.draw_path(&input_path, &iborder);
+            if let Some((_, te)) = edit.command.filter(|(i, _)| i == index) {
+                draw_text_edit(
+                    canvas,
+                    input_rect,
+                    &fonts.font(12.0),
+                    theme.text,
+                    theme.accent,
+                    &te.text,
+                    Some(te),
+                );
+            } else {
+                let shown = if aliases.is_empty() { "输入别名,逗号分隔喵…" } else { aliases };
+                let mut ip = Paint::default();
+                ip.set_color(if aliases.is_empty() { theme.text_dim } else { theme.text });
+                ip.set_anti_alias(true);
+                crate::render::text::draw_clipped(
+                    canvas,
+                    shown,
+                    Rect::from_xywh(input_rect.left + 8.0, input_rect.top, input_rect.width() - 12.0, input_rect.height()),
+                    &fonts.font(12.0),
+                    &ip,
+                );
+            }
+            hits.push((screen_hit(input_rect, scroll), RowHit::CommandAlias(*index)));
+
+            // 命令类型循环按钮(点击在 锁屏/睡眠/关机/重启 间轮换)喵
+            let kind_rect = Rect::from_xywh(rect.right - 136.0, rect.center_y() - 14.0, 92.0, 28.0);
+            let kind_path = shape::rounded_rect_path(kind_rect, CTRL_RADIUS);
+            let mut kbg = Paint::default();
+            kbg.set_color(theme.control_bg);
+            kbg.set_anti_alias(true);
+            canvas.draw_path(&kind_path, &kbg);
+            let mut kb = Paint::default();
+            kb.set_color(theme.control_border);
+            kb.set_anti_alias(true);
+            kb.set_style(PaintStyle::Stroke);
+            kb.set_stroke_width(1.0);
+            canvas.draw_path(&kind_path, &kb);
+            let mut kp = Paint::default();
+            kp.set_color(theme.text);
+            kp.set_anti_alias(true);
+            crate::render::text::draw_centered(canvas, kind.title(), kind_rect, &fonts.font(12.0), &kp);
+            hits.push((screen_hit(kind_rect, scroll), RowHit::CommandKind(*index)));
+
+            // 删除按钮(内嵌关闭 SVG)喵
+            let del_rect = Rect::from_xywh(rect.right - 34.0, rect.center_y() - 13.0, 26.0, 26.0);
+            let del_path = shape::rounded_rect_path(del_rect, CTRL_RADIUS);
+            let mut dbg = Paint::default();
+            dbg.set_color(theme.control_bg);
+            dbg.set_anti_alias(true);
+            canvas.draw_path(&del_path, &dbg);
+            let mut dbr = Paint::default();
+            dbr.set_color(theme.control_border);
+            dbr.set_anti_alias(true);
+            dbr.set_style(PaintStyle::Stroke);
+            dbr.set_stroke_width(1.0);
+            canvas.draw_path(&del_path, &dbr);
+            icon::draw_builtin(canvas, del_rect, "close", theme.text);
+            hits.push((screen_hit(del_rect, scroll), RowHit::CommandDelete(*index)));
         }
     }
 }
