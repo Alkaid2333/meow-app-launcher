@@ -1,6 +1,6 @@
 //! 系统托盘喵~
 //!
-//! 托盘图标(主题自适应) + 右键菜单(显示/隐藏、设置、重启、退出)喵。
+//! 托盘图标(exe 内嵌应用图标) + 右键菜单(显示/隐藏、设置、重启、退出)喵。
 //! 单击托盘图标 = 显示/隐藏启动器切换喵。
 //!
 //! 托盘不直接操作窗口,而是把意图投递到应用命令队列,由启动器(应用控制器)统一执行喵。
@@ -12,12 +12,9 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Arc;
 
-/// 托盘图标尺寸喵
-const ICON_SIZE: u32 = 32;
-
 /// 系统托盘喵
 pub struct Tray {
-    /// 共享应用状态喵(判断启动器可见性、主题)喵
+    /// 共享应用状态喵(判断启动器可见性)喵
     state: SharedState,
     /// 应用命令队列喵
     commands: Rc<RefCell<VecDeque<Command>>>,
@@ -25,8 +22,6 @@ pub struct Tray {
     platform: Arc<dyn Platform>,
     /// 托盘句柄喵
     tray: TrayHandle,
-    /// 当前是否深色主题喵(用于图标自适应)喵
-    dark: bool,
 }
 
 impl Tray {
@@ -43,17 +38,15 @@ impl Tray {
             std::process::exit(1);
         });
 
-        // 主题预设均为浅色,托盘图标固定用深色线稿(保证在浅色托盘上可见)喵
-        let dark = false;
+        // 主题预设均为浅色,托盘直接用应用同款 ico(任何任务栏底色都醒目)喵
         let mut handler = Tray {
             state: state.clone(),
             commands,
             platform: platform.clone(),
             tray,
-            dark,
         };
 
-        // 初始图标 + 提示 + 菜单喵
+        // 图标(exe 内嵌资源) + 提示 + 菜单喵
         handler.apply_icon();
         platform.set_tray_tip(&tray, "meow app launcher");
         handler.refresh_menu();
@@ -63,15 +56,9 @@ impl Tray {
         tray
     }
 
-    /// 判断当前是否深色主题喵(主题预设均为浅色,恒为 false)喵
-    fn is_dark(&self) -> bool {
-        false
-    }
-
-    /// 按当前主题更新托盘图标喵
+    /// 重新应用托盘图标喵(与应用图标保持一致)喵
     fn apply_icon(&mut self) {
-        let (w, h, pixels) = tray_icon_pixels(self.dark);
-        self.platform.set_tray_icon(&self.tray, w, h, &pixels);
+        self.platform.set_tray_app_icon(&self.tray);
     }
 
     /// 刷新托盘菜单(「显示/隐藏」文本随启动器可见性动态变化)喵
@@ -101,13 +88,6 @@ impl Tray {
 
 impl TrayHandler for Tray {
     fn on_event(&mut self, event: TrayEvent) {
-        // 主题可能已变化,同步图标喵
-        let dark = self.is_dark();
-        if dark != self.dark {
-            self.dark = dark;
-            self.apply_icon();
-        }
-
         match event {
             TrayEvent::LeftClick => {
                 log::info!("托盘单击,切换启动器喵");
@@ -131,35 +111,4 @@ impl TrayHandler for Tray {
         // 刷新菜单文本(可见性可能已变化)喵
         self.refresh_menu();
     }
-}
-
-/// 生成托盘图标像素喵(一个圆点,深色主题用浅色,浅色主题用深色)喵
-fn tray_icon_pixels(dark: bool) -> (u32, u32, Vec<u8>) {
-    let size = ICON_SIZE;
-    let mut bgra = vec![0u8; (size * size * 4) as usize];
-    // 深色主题 → 白色圆点;浅色主题 → 深灰圆点喵
-    let (r, g, b) = if dark {
-        (0xE8, 0xE8, 0xE8)
-    } else {
-        (0x3A, 0x3A, 0x3E)
-    };
-
-    let center = size as f32 / 2.0;
-    let radius = size as f32 / 2.0 - 5.0;
-    let radius_sq = radius * radius;
-
-    for y in 0..size {
-        for x in 0..size {
-            let dx = x as f32 + 0.5 - center;
-            let dy = y as f32 + 0.5 - center;
-            if dx * dx + dy * dy <= radius_sq {
-                let idx = ((y * size + x) * 4) as usize;
-                bgra[idx] = b;
-                bgra[idx + 1] = g;
-                bgra[idx + 2] = r;
-                bgra[idx + 3] = 255;
-            }
-        }
-    }
-    (size, size, bgra)
 }

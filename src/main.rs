@@ -36,6 +36,14 @@ fn main() {
     log::info!("喵喵启动器启动喵! 版本 {}", env!("CARGO_PKG_VERSION"));
 
     let platform = platform::platform();
+
+    // 单实例保护喵: 已有实例在跑时,把「唤起」意图转交给它后退出
+    // (再次启动 meowal = 呼出已有实例的搜索框,不再出现双岛互踩)喵
+    if !platform.try_acquire_single_instance() {
+        platform.notify_existing_instance();
+        return;
+    }
+
     let state: SharedState = Rc::new(RefCell::new(AppState::new(platform.clone(), data_dir)));
     let commands = Rc::new(RefCell::new(VecDeque::new()));
 

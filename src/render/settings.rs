@@ -10,7 +10,7 @@
 use crate::render::edit::{draw_text_edit, TextEdit};
 use crate::render::font::FontCache;
 use crate::render::shape;
-use crate::render::svg;
+use crate::render::icon;
 use crate::render::theme::SettingsTheme;
 use skia_safe::{BlurStyle, Canvas, Color, Data, Image, MaskFilter, Paint, PaintStyle, Rect};
 
@@ -333,7 +333,7 @@ fn paint_sidebar(
         canvas.restore();
     } else {
         // 图标解码失败时兜底: 内嵌设置齿轮喵
-        svg::icon("settings").draw(canvas, inset_rect(logo, 5.0, 5.0), Color::WHITE);
+        icon::draw_builtin(canvas, logo, "settings", Color::WHITE);
     }
 
     let mut tp = Paint::default();
@@ -395,7 +395,7 @@ fn paint_sidebar(
         let font = fonts.font(13.0);
         match page.title.as_str() {
             // 「关于」页用内嵌信息图标,其余沿用字符图标喵
-            "关于" => svg::icon("info").draw(canvas, inset_rect(glyph_rect, 6.0, 6.0), glyph_color),
+            "关于" => icon::draw_builtin(canvas, glyph_rect, "info", glyph_color),
             _ => {
                 let glyph = match page.title.as_str() {
                     "常规" => "◉",
@@ -442,7 +442,7 @@ fn paint_close_button(
     border.set_stroke_width(1.0);
     canvas.draw_path(&path, &border);
     // 关闭符号(内嵌 SVG)喵
-    svg::icon("close").draw(canvas, rect, theme.text_dim);
+    icon::draw_builtin(canvas, rect, "close", theme.text_dim);
     hits.push((rect, RowHit::Close));
 }
 
@@ -896,7 +896,7 @@ fn paint_row(
             dbr.set_style(PaintStyle::Stroke);
             dbr.set_stroke_width(1.0);
             canvas.draw_path(&del_path, &dbr);
-            svg::icon("close").draw(canvas, inset_rect(del_rect, 4.0, 4.0), theme.text);
+            icon::draw_builtin(canvas, del_rect, "close", theme.text);
             hits.push((screen_hit(del_rect, scroll), RowHit::FilterDelete(*index)));
         }
     }
@@ -981,12 +981,6 @@ fn draw_chip(
 }
 
 /// 矩形内缩(返回新值,Skia 的 inset 是原地修改返回 ())喵
-fn inset_rect(rect: Rect, dx: f32, dy: f32) -> Rect {
-    let mut r = rect;
-    r.inset((dx, dy));
-    r
-}
-
 /// 命中区转屏幕坐标(内容区绘制时 canvas 已 -scroll,命中要加回来)喵
 fn screen_hit(rect: Rect, scroll: f32) -> Rect {
     Rect::from_xywh(rect.left, rect.top - scroll, rect.width(), rect.height())
@@ -1029,7 +1023,7 @@ fn draw_restore_icon(canvas: &Canvas, theme: &SettingsTheme, rect: Rect) {
     border.set_style(PaintStyle::Stroke);
     border.set_stroke_width(1.0);
     canvas.draw_path(&path, &border);
-    svg::icon("rollback-arrow").draw(canvas, inset_rect(rect, 3.0, 3.0), theme.accent);
+    icon::draw_builtin(canvas, rect, "rollback-arrow", theme.accent);
 }
 
 /// 绘制开关喵
@@ -1098,8 +1092,8 @@ fn draw_control_button(
 /// 绘制 checkbox(大小写判定开关)喵: 用内置 SVG,勾选时强调色喵
 fn draw_checkbox(canvas: &Canvas, theme: &SettingsTheme, rect: Rect, checked: bool) {
     if checked {
-        svg::icon("checkbox-true").draw(canvas, rect, theme.accent);
+        icon::draw_builtin(canvas, rect, "checkbox-true", theme.accent);
     } else {
-        svg::icon("checkbox-false").draw(canvas, rect, theme.control_border);
+        icon::draw_builtin(canvas, rect, "checkbox-false", theme.control_border);
     }
 }

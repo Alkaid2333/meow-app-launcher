@@ -12,18 +12,22 @@ pub mod config;
 use crate::apps::{AppInfo, AppRegistry, icon::IconManager};
 use crate::app::config::{AppConfig, SearchMode};
 use crate::platform::Platform;
-use crate::search::{to_pinyin_initials, SearchEngine};
+use crate::search::{
+    Action, ItemIcon, MAX_RESULTS, Scored, SearchEngine, SearchItem,
+    builtin_providers, query_mode, to_pinyin_initials,
+};
+use crate::search::ProviderContext;
 
 /// 空查询时每类推荐最多条数喵
 const QUICK_LIMIT: usize = 8;
 
-/// 结果列表条目喵(分组头不可启动)喵
+/// 结果列表条目喵(分组头不可激活)喵
 #[derive(Debug, Clone)]
 pub enum ListItem {
     /// 分组标题喵
     Section(String),
-    /// 应用喵
-    App(AppInfo),
+    /// 统一搜索条目(应用/计算器/命令/Web 均走这里)喵
+    Item(SearchItem),
 }
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -175,20 +179,45 @@ impl AppState {
 
     /// 根据当前查询重新计算列表喵,返回条目数喵
     pub fn refresh_results(&mut self) -> usize {
-        let q = self.query.trim();
+        let q = self.query.trim().to_string();
         self.results = if q.is_empty() {
             browse_list(&self.registry, &self.config)
         } else {
-            self.search
-                .search(&self.registry, &self.config, q)
-                .into_iter()
-                .cloned()
-                .map(ListItem::App)
-                .collect()
+            self.aggregated_results(&q)
         };
         self.results_visible = !self.results.is_empty();
-        self.selected = first_app_index(&self.results).unwrap_or(0);
+        self.selected = first_selectable_index(&self.results).unwrap_or(0);
         self.results.len()
+    }
+
+    /// 非空查询的多源聚合喵: 应用源 + 内置 Provider(计算器/命令/Web)混排喵
+    ///
+    /// 分数域约定: 计算器 3.0 置顶、命令 = 模糊分 + 2.0、应用为原始模糊分、
+    /// Web 固定 0.0 垫底;t:/i: 定向模式不注入多源结果喵。
+    /// 排序后统一截断到 [`MAX_RESULTS`],保证交互预算喵。
+    fn aggregated_results(&self, query: &str) -> Vec<ListItem> {
+        let mut scored: Vec<Scored> = Vec::new();
+
+        if query_mode(query) == crate::search::SearchMode::Name {
+            let ctx = ProviderContext { query, config: &self.config };
+            for provider in builtin_providers() {
+                scored.extend(provider.query(&ctx));
+            }
+        }
+
+        for (app, score) in self.search.search_scored(&self.registry, &self.config, query) {
+            scored.push(Scored::new(score, SearchItem::from_app(app)));
+        }
+
+        // 分数降序,同分按标题排序保证稳定喵
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.item.title.cmp(&b.item.title))
+        });
+        scored.truncate(MAX_RESULTS);
+        scored.into_iter().map(|s| ListItem::Item(s.item)).collect()
     }
 
     /// 移动选中,跳过分组头喵
@@ -200,31 +229,62 @@ impl AppState {
         let mut idx = self.selected as isize;
         for _ in 0..len {
             idx = (idx + delta).rem_euclid(len);
-            if matches!(self.results.get(idx as usize), Some(ListItem::App(_))) {
+            if matches!(self.results.get(idx as usize), Some(ListItem::Item(_))) {
                 self.selected = idx as usize;
                 return;
             }
         }
     }
 
-    /// 当前选中的应用喵
-    pub fn selected_app(&self) -> Option<&AppInfo> {
+    /// 当前选中的条目喵
+    pub fn selected_item(&self) -> Option<&SearchItem> {
         match self.results.get(self.selected) {
-            Some(ListItem::App(app)) => Some(app),
+            Some(ListItem::Item(item)) => Some(item),
             _ => None,
         }
     }
 
-    /// 启动当前选中的应用喵,返回成功启动的应用名喵~
-    pub fn launch_selected(&mut self) -> Option<String> {
-        let app = self.selected_app()?.clone();
-        let launched = self.platform.launch(&app.path);
-        if launched {
-            log::info!("启动应用: {} ({}) 喵", app.name, app.path);
-            self.record_launch(&app.name);
-            Some(app.name)
-        } else {
-            None
+    /// 执行当前选中条目的动作喵,返回人类可读的结果描述(失败为 None)喵
+    ///
+    /// 应用条目顺带记录使用统计(次数 + 最近时间)喵。
+    pub fn execute_selected(&mut self) -> Option<String> {
+        let item = self.selected_item()?.clone();
+        match &item.action {
+            Action::Launch(path) => {
+                if !self.platform.launch(path) {
+                    log::warn!("启动失败: {} ({}) 喵", item.title, path);
+                    return None;
+                }
+                if let ItemIcon::App(app) = &item.icon {
+                    log::info!("启动应用: {} ({}) 喵", app.name, path);
+                    self.record_launch(&app.name);
+                } else {
+                    log::info!("启动: {path} 喵");
+                }
+                Some(item.title.clone())
+            }
+            Action::OpenUrl(url) => {
+                // 空浏览器 = 系统默认;配置了就走自定义浏览器喵
+                let browser = self.config.search.web_browser.clone();
+                if !self.platform.open_url(url, &browser) {
+                    log::warn!("打开链接失败: {url} 喵");
+                    return None;
+                }
+                log::info!("打开链接: {url} 喵");
+                Some(item.title.clone())
+            }
+            Action::CopyText(text) => {
+                if !self.platform.copy_to_clipboard(text) {
+                    return None;
+                }
+                Some(format!("已复制 {text}"))
+            }
+            Action::SystemCommand(kind) => {
+                if !self.platform.execute_system_command(*kind) {
+                    return None;
+                }
+                Some(item.title.clone())
+            }
         }
     }
 
@@ -314,7 +374,7 @@ fn push_section(items: &mut Vec<ListItem>, title: &str, apps: Vec<&AppInfo>) {
         return;
     }
     items.push(ListItem::Section(title.into()));
-    items.extend(apps.into_iter().cloned().map(ListItem::App));
+    items.extend(apps.into_iter().cloned().map(|a| ListItem::Item(SearchItem::from_app(&a))));
 }
 
 fn push_initial_groups(items: &mut Vec<ListItem>, apps: &[&AppInfo]) {
@@ -335,10 +395,11 @@ fn push_initial_groups(items: &mut Vec<ListItem>, apps: &[&AppInfo]) {
             current = letter;
             items.push(ListItem::Section(letter.to_string()));
         }
-        items.push(ListItem::App((*app).clone()));
+        items.push(ListItem::Item(SearchItem::from_app(app)));
     }
 }
 
-fn first_app_index(items: &[ListItem]) -> Option<usize> {
-    items.iter().position(|i| matches!(i, ListItem::App(_)))
+/// 第一个可激活条目的索引喵(跳过分组头)喵
+fn first_selectable_index(items: &[ListItem]) -> Option<usize> {
+    items.iter().position(|i| matches!(i, ListItem::Item(_)))
 }

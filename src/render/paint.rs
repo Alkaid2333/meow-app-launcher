@@ -274,13 +274,17 @@ fn draw_items(
         }
         match state.results.get(i) {
             Some(ListItem::Section(title)) => draw_section(canvas, theme, item_rect, title, fonts),
-            Some(ListItem::App(app)) => {
-                let icon = state.icons.cached_image(app);
+            Some(ListItem::Item(item)) => {
+                // 应用走缓存图标,内置图标在 draw_item 里用 SVG 画喵
+                let icon = match &item.icon {
+                    crate::search::ItemIcon::App(app) => state.icons.cached_image(app),
+                    crate::search::ItemIcon::Builtin(_) => None,
+                };
                 draw_item(
                     canvas,
                     theme,
                     item_rect,
-                    app,
+                    item,
                     icon,
                     i == selected,
                     layout,
@@ -334,7 +338,7 @@ fn draw_item(
     canvas: &Canvas,
     theme: &Theme,
     rect: &Rect,
-    app: &crate::apps::AppInfo,
+    item: &crate::search::SearchItem,
     icon: Option<skia_safe::Image>,
     selected: bool,
     layout: &Layout,
@@ -343,7 +347,7 @@ fn draw_item(
 ) {
     // 网格排版: 单元格卡片式绘制(图标居中上排 + 名称居中)喵
     if grid {
-        return draw_grid_item(canvas, theme, rect, app, icon, selected, layout, fonts);
+        return draw_grid_item(canvas, theme, rect, item, icon, selected, layout, fonts);
     }
 
     if selected {
@@ -374,10 +378,19 @@ fn draw_item(
         icon_size,
         icon_size,
     );
-    match icon {
-        Some(img) => draw_icon(canvas, &img, icon_rect),
-        None => draw_fallback_icon(canvas, theme, icon_rect, &app.name, fonts),
-    }
+    // 图标统一走 icon 层: 光栅直出,无图时按源类型选 SVG 或字符兜底喵
+    let source = match icon {
+        Some(img) => super::icon::IconSource::Raster(img),
+        None => match &item.icon {
+            crate::search::ItemIcon::App(_) => {
+                super::icon::IconSource::Fallback(item.fallback_label())
+            }
+            crate::search::ItemIcon::Builtin(bi) => {
+                super::icon::IconSource::Builtin(bi.svg_name())
+            }
+        },
+    };
+    super::icon::draw(canvas, theme, icon_rect, source, fonts);
 
     let text_x = icon_rect.right + 12.0;
     let name_font = fonts.font(rect.height() * 0.38);
@@ -388,7 +401,7 @@ fn draw_item(
     name_paint.set_anti_alias(true);
     text::draw_clipped(
         canvas,
-        &app.name,
+        &item.title,
         Rect::from_xywh(text_x, rect.top, rect.right - text_x - 8.0, rect.height() * 0.58),
         &name_font,
         &name_paint,
@@ -397,11 +410,7 @@ fn draw_item(
     let mut path_paint = Paint::default();
     path_paint.set_color(theme.text_dim);
     path_paint.set_anti_alias(true);
-    let subtitle = if app.tags.is_empty() {
-        app.path.clone()
-    } else {
-        format!("{}  ·  {}", app.tags.join(" / "), app.path)
-    };
+    let subtitle = item.subtitle.clone().unwrap_or_default();
     text::draw_clipped(
         canvas,
         &subtitle,
@@ -422,7 +431,7 @@ fn draw_grid_item(
     canvas: &Canvas,
     theme: &Theme,
     rect: &Rect,
-    app: &crate::apps::AppInfo,
+    item: &crate::search::SearchItem,
     icon: Option<skia_safe::Image>,
     selected: bool,
     layout: &Layout,
@@ -452,10 +461,19 @@ fn draw_grid_item(
         icon_size,
         icon_size,
     );
-    match icon {
-        Some(img) => draw_icon(canvas, &img, icon_rect),
-        None => draw_fallback_icon(canvas, theme, icon_rect, &app.name, fonts),
-    }
+    // 图标统一走 icon 层喵(网格与列表同一套缩放标准)喵
+    let source = match icon {
+        Some(img) => super::icon::IconSource::Raster(img),
+        None => match &item.icon {
+            crate::search::ItemIcon::App(_) => {
+                super::icon::IconSource::Fallback(item.fallback_label())
+            }
+            crate::search::ItemIcon::Builtin(bi) => {
+                super::icon::IconSource::Builtin(bi.svg_name())
+            }
+        },
+    };
+    super::icon::draw(canvas, theme, icon_rect, source, fonts);
 
     // 名称左对齐渲染(长名称只从右侧裁剪,不再左右同时截断)喵
     let name_font = fonts.font((rect.height() * 0.16).max(10.0));
@@ -470,34 +488,14 @@ fn draw_grid_item(
     );
     canvas.save();
     canvas.clip_rect(name_rect, None, Some(false));
-    text::draw_clipped(canvas, &app.name, name_rect, &name_font, &np);
+    text::draw_clipped(canvas, &item.title, name_rect, &name_font, &np);
     canvas.restore();
 }
 
-fn draw_icon(canvas: &Canvas, image: &skia_safe::Image, dst: Rect) {
-    let mut paint = Paint::default();
-    paint.set_anti_alias(true);
-    canvas.draw_image_rect(image, None, dst, &paint);
-}
-
-fn draw_fallback_icon(canvas: &Canvas, theme: &Theme, rect: Rect, name: &str, fonts: &FontCache) {
-    let path = shape::rounded_rect_path(rect, rect.width() * 0.22);
-    let mut bg = Paint::default();
-    bg.set_color(theme.accent);
-    bg.set_anti_alias(true);
-    canvas.draw_path(&path, &bg);
-
-    let chars: String = name.chars().take(2).collect();
-    let label = if chars.is_empty() {
-        "?".to_string()
-    } else {
-        chars
-    };
-    let font = fonts.font(rect.width() * 0.38);
-    let mut p = Paint::default();
-    p.set_color(theme.accent_text);
-    p.set_anti_alias(true);
-    text::draw_centered(canvas, &label, rect, &font, &p);
+/// 绘制搜索图标喵(统一图标层的内置放大镜,随主题配色)喵
+fn draw_search_icon(canvas: &Canvas, cx: f32, cy: f32, size: f32, color: Color) {
+    let rect = Rect::from_xywh(cx - size / 2.0, cy - size / 2.0, size, size);
+    super::icon::draw_builtin(canvas, rect, "magnifying-glass", color);
 }
 
 /// 画岛下投影喵: 裁掉顶部上方的光斑,避免「重影」错觉喵
@@ -521,10 +519,4 @@ fn draw_shadow(canvas: &Canvas, path: &skia_safe::Path, rect: Rect, color: Color
     p.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, blur, None));
     canvas.draw_path(path, &p);
     canvas.restore();
-}
-
-/// 绘制搜索图标喵(内嵌 SVG 放大镜,自动适配配色)喵
-fn draw_search_icon(canvas: &Canvas, cx: f32, cy: f32, size: f32, color: Color) {
-    let rect = Rect::from_xywh(cx - size / 2.0, cy - size / 2.0, size, size);
-    crate::render::svg::icon("magnifying-glass").draw(canvas, rect, color);
 }

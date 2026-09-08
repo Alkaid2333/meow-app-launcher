@@ -3,6 +3,7 @@
 //! 配置文件生成在 `./.datas/config.json` 喵,首次启动自动创建默认配置喵。
 
 use crate::animation::IslandConfig;
+use crate::platform::SystemCommandKind;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -214,14 +215,89 @@ impl FilterRule {
     }
 }
 
+/// Web 搜索引擎喵(跳转默认浏览器,零网络依赖)喵
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WebEngine {
+    /// 百度喵
+    #[default]
+    Baidu,
+    /// 必应喵
+    Bing,
+    /// 搜狗喵
+    Sogou,
+    /// 谷歌喵
+    Google,
+    /// DuckDuckGo 喵
+    Duckduckgo,
+}
+
+impl WebEngine {
+    /// 给配置 GUI 看的名字喵
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Baidu => "百度",
+            Self::Bing => "必应",
+            Self::Sogou => "搜狗",
+            Self::Google => "谷歌",
+            Self::Duckduckgo => "DuckDuckGo",
+        }
+    }
+
+    /// 生成搜索链接喵(查询词自动百分号编码)喵
+    pub fn search_url(self, query: &str) -> String {
+        let q = crate::utils::percent_encode_component(query);
+        match self {
+            Self::Baidu => format!("https://www.baidu.com/s?wd={q}"),
+            Self::Bing => format!("https://www.bing.com/search?q={q}"),
+            Self::Sogou => format!("https://www.sogou.com/web?query={q}"),
+            Self::Google => format!("https://www.google.com/search?q={q}"),
+            Self::Duckduckgo => format!("https://duckduckgo.com/?q={q}"),
+        }
+    }
+}
+
+/// 系统指令条目喵: 一条命令 + 任意多个触发别名(中英文/拼音缩写随配)喵
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommandEntry {
+    /// 触发别名喵(任一别名命中即出结果)喵
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    /// 对应的系统命令喵
+    pub kind: SystemCommandKind,
+}
+
+/// 默认指令表喵(中英双语,老配置缺字段时回填)喵
+fn default_commands() -> Vec<CommandEntry> {
+    use crate::platform::SystemCommandKind as K;
+    vec![
+        CommandEntry { aliases: vec!["锁屏".into(), "lock".into()], kind: K::Lock },
+        CommandEntry { aliases: vec!["睡眠".into(), "sleep".into()], kind: K::Sleep },
+        CommandEntry { aliases: vec!["关机".into(), "shutdown".into()], kind: K::Shutdown },
+        CommandEntry {
+            aliases: vec!["重启".into(), "restart".into(), "reboot".into()],
+            kind: K::Restart,
+        },
+    ]
+}
+
 /// 搜索配置喵
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchConfig {
     /// 默认搜索模式喵
     pub default_mode: SearchMode,
     /// 过滤关键词规则喵(扫描/浏览/搜索时统一排除;旧配置缺字段时回填默认)喵
     #[serde(default = "default_filters")]
     pub filters: Vec<FilterRule>,
+    /// Web 搜索引擎喵(旧配置缺字段时回填默认)喵
+    #[serde(default)]
+    pub web_engine: WebEngine,
+    /// Web 搜索用的浏览器喵(空 = 系统默认;支持含 %1 占位符的路径)喵
+    #[serde(default)]
+    pub web_browser: String,
+    /// 指令模块喵(系统命令别名表,可自由增删改)喵
+    #[serde(default = "default_commands")]
+    pub commands: Vec<CommandEntry>,
 }
 
 /// 默认过滤规则: 排除「卸载 / uninstall」类启动项喵
@@ -243,6 +319,9 @@ impl Default for SearchConfig {
         Self {
             default_mode: SearchMode::Name,
             filters: default_filters(),
+            web_engine: WebEngine::default(),
+            web_browser: String::new(),
+            commands: default_commands(),
         }
     }
 }

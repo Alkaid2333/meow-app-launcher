@@ -54,7 +54,7 @@ fn browse_list_filters_uninstall_keywords() {
     let apps: Vec<&str> = items
         .iter()
         .filter_map(|i| match i {
-            ListItem::App(a) => Some(a.name.as_str()),
+            ListItem::Item(item) => Some(item.title.as_str()),
             _ => None,
         })
         .collect();

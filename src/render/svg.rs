@@ -10,7 +10,7 @@ use std::f32::consts::PI;
 use std::sync::OnceLock;
 
 /// 内置图标名 → 内嵌 SVG 源喵
-pub const ICONS: [(&str, &str); 7] = [
+pub const ICONS: [(&str, &str); 10] = [
     (
         "magnifying-glass",
         include_str!("../../assets/icons/magnifying-glass.svg"),
@@ -30,18 +30,40 @@ pub const ICONS: [(&str, &str); 7] = [
         "checkbox-false",
         include_str!("../../assets/icons/checkbox-false.svg"),
     ),
+    (
+        "calculator",
+        include_str!("../../assets/icons/calculator.svg"),
+    ),
+    ("web", include_str!("../../assets/icons/web.svg")),
+    ("power", include_str!("../../assets/icons/power.svg")),
 ];
 
 /// 解析后的图标几何喵
 #[derive(Debug)]
 pub struct SvgIcon {
-    /// 是否为描边型(true = stroke,false = fill)喵
-    stroke: bool,
+    /// viewBox 喵(min_x, min_y, width, height),默认 24×24 画布喵
+    pub view: (f32, f32, f32, f32),
     shapes: Vec<Shape>,
 }
 
+/// 单个可绘制元素喵(元素自带风格,支持线稿/填充混排)喵
 #[derive(Debug)]
-enum Shape {
+struct Shape {
+    kind: ShapeKind,
+    style: IconStyle,
+}
+
+/// 图标绘制风格喵
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IconStyle {
+    /// 描边线稿喵(圆头圆角,线宽随缩放)喵
+    Stroke,
+    /// 实心填充喵
+    Fill,
+}
+
+#[derive(Debug)]
+enum ShapeKind {
     /// SVG path 数据喵
     Path(String),
     Line { x1: f32, y1: f32, x2: f32, y2: f32 },
@@ -52,7 +74,10 @@ enum Shape {
 
 /// 取内置图标(惰性解析 + 缓存)喵
 pub fn icon(name: &str) -> &'static SvgIcon {
-    static CACHE: [OnceLock<SvgIcon>; 7] = [
+    static CACHE: [OnceLock<SvgIcon>; 10] = [
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
         OnceLock::new(),
         OnceLock::new(),
         OnceLock::new(),
@@ -71,56 +96,55 @@ impl SvgIcon {
         self.shapes.len()
     }
 
-    /// 把图标画到目标矩形内(自动缩放,描边线宽随尺寸)喵
+    /// 把图标画到目标矩形内喵(viewBox 等比缩放 + 居中,线稿/填充逐元素生效)喵
     pub fn draw(&self, canvas: &Canvas, rect: Rect, color: Color) {
-        let w = rect.width().max(1.0);
-        let h = rect.height().max(1.0);
-        let s = w.min(h) / 24.0;
-
-        let mut p = Paint::default();
-        p.set_color(color);
-        p.set_anti_alias(true);
-        p.set_style(if self.stroke {
-            PaintStyle::Stroke
-        } else {
-            PaintStyle::Fill
-        });
-        if self.stroke {
-            p.set_stroke_width((2.0 * s).max(1.0));
-            p.set_stroke_cap(skia_safe::PaintCap::Round);
-            p.set_stroke_join(skia_safe::PaintJoin::Round);
-        }
-
+        let (minx, miny, vw, vh) = self.view;
+        let (vw, vh) = (vw.max(1.0), vh.max(1.0));
+        // viewBox → 目标矩形的等比缩放,完整可见喵
+        let scale = (rect.width() / vw).min(rect.height() / vh);
         // 平移取整,避免次像素模糊喵
-        let side = w.min(h);
-        let dx = (rect.center_x() - side / 2.0).round();
-        let dy = (rect.center_y() - side / 2.0).round();
+        let dx = (rect.left + (rect.width() - vw * scale) / 2.0 - minx * scale).round();
+        let dy = (rect.top + (rect.height() - vh * scale) / 2.0 - miny * scale).round();
         canvas.save();
         canvas.translate((dx, dy));
-        canvas.scale((s, s));
+        canvas.scale((scale, scale));
         for shape in &self.shapes {
-            match shape {
-                Shape::Path(d) => {
+            let mut p = Paint::default();
+            p.set_color(color);
+            p.set_anti_alias(true);
+            match shape.style {
+                IconStyle::Stroke => {
+                    p.set_style(PaintStyle::Stroke);
+                    // 线宽按 viewBox 单位计,缩放后视觉一致喵
+                    p.set_stroke_width(2.0);
+                    p.set_stroke_cap(skia_safe::PaintCap::Round);
+                    p.set_stroke_join(skia_safe::PaintJoin::Round);
+                }
+                IconStyle::Fill => {
+                    p.set_style(PaintStyle::Fill);
+                }
+            }
+            match &shape.kind {
+                ShapeKind::Path(d) => {
                     let path = build_path(d);
                     canvas.draw_path(&path, &p);
                 }
-                Shape::Line { x1, y1, x2, y2 } => {
+                ShapeKind::Line { x1, y1, x2, y2 } => {
                     canvas.draw_line((*x1, *y1), (*x2, *y2), &p);
                 }
-                Shape::Circle { cx, cy, r } => {
-                    let rr = (*r).max(0.0);
-                    canvas.draw_circle((*cx, *cy), rr, &p);
+                ShapeKind::Circle { cx, cy, r } => {
+                    canvas.draw_circle((*cx, *cy), (*r).max(0.0), &p);
                 }
-                Shape::Rect { x, y, w, h, r } => {
+                ShapeKind::Rect { x, y, w, h, r } => {
                     let rrect = Rect::from_xywh(*x, *y, *w, *h);
-                    if self.stroke {
+                    if shape.style == IconStyle::Stroke {
                         let path = rounded_stroke_path(rrect, *r);
                         canvas.draw_path(&path, &p);
                     } else {
                         canvas.draw_rect(rrect, &p);
                     }
                 }
-                Shape::Polyline(pts) => {
+                ShapeKind::Polyline(pts) => {
                     let mut b = PathBuilder::new();
                     if let Some((x, y)) = pts.first() {
                         b.move_to((*x, *y));
@@ -158,10 +182,12 @@ fn rounded_stroke_path(rect: Rect, r: f32) -> Path {
 // ---------------------------------------------------------------------------
 
 /// 解析内嵌 SVG 字符串喵(渲染层内部用,公开便于单测)喵
+///
+/// 支持: viewBox 画布映射(任意尺寸)、逐元素 fill/stroke 风格判定、
+/// path/line/circle/rect/polyline 子集喵。无属性元素默认按线稿处理喵。
 pub fn parse_svg(xml: &str) -> SvgIcon {
-    let lower = xml.to_ascii_lowercase();
-    let stroke = lower.contains("fill=\"none\"") || lower.contains("stroke=\"currentcolor\"");
     let mut shapes = Vec::new();
+    let mut view = (0.0_f32, 0.0_f32, 24.0_f32, 24.0_f32);
 
     // 逐元素提取 <tag .../> 与 <tag ...>...</tag> 喵
     let mut rest = xml;
@@ -171,87 +197,111 @@ pub fn parse_svg(xml: &str) -> SvgIcon {
             .map(|i| start + i + 1)
             .unwrap_or(rest.len());
         let tag = &rest[start..end];
-        parse_element(tag, &mut shapes);
+        let name = tag[1..]
+            .trim_end_matches('/')
+            .trim()
+            .split(|c: char| c.is_whitespace())
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if name == "svg" {
+            // 根元素: 读 viewBox 画布喵
+            if let Some(vb) = attr(tag, "viewBox") {
+                let nums = numbers(&vb);
+                if nums.len() >= 4 && nums[2] > 0.0 && nums[3] > 0.0 {
+                    view = (nums[0], nums[1], nums[2], nums[3]);
+                }
+            }
+        } else if let Some((style, kind)) = parse_element(tag) {
+            shapes.push(Shape { kind, style });
+        }
         rest = &rest[end..];
     }
-    SvgIcon { stroke, shapes }
+    SvgIcon { view, shapes }
 }
 
-fn parse_element(tag: &str, out: &mut Vec<Shape>) {
+/// 判定单个元素的绘制风格喵: 显式 stroke → 线稿,显式 fill → 填充,否则线稿喵
+fn element_style(tag_lower: &str) -> IconStyle {
+    let stroke_none = tag_lower.contains("stroke=\"none\"")
+        || tag_lower.contains("stroke='none'")
+        || tag_lower.contains("stroke:none");
+    let has_stroke = tag_lower.contains("stroke=") && !stroke_none;
+    let fill_none = tag_lower.contains("fill=\"none\"")
+        || tag_lower.contains("fill='none'")
+        || tag_lower.contains("fill:none");
+    let has_fill = (tag_lower.contains("fill=") || tag_lower.contains("fill:")) && !fill_none;
+    if has_stroke {
+        IconStyle::Stroke
+    } else if has_fill {
+        IconStyle::Fill
+    } else {
+        IconStyle::Stroke
+    }
+}
+
+/// 解析单个元素喵,返回 (风格, 几何)喵
+fn parse_element(tag: &str) -> Option<(IconStyle, ShapeKind)> {
     let tag = &tag[1..]; // 去掉 '<' 喵
     let t = tag.trim_end_matches('/').trim();
     // 元素名到第一个空格或 '>' 为止喵
     let name_end = t.find(|c: char| c.is_whitespace()).unwrap_or(t.len());
     let name = &t[..name_end];
+    let style = element_style(&t.to_ascii_lowercase());
 
-    match name {
+    let kind = match name {
         "path" => {
-            if let Some(d) = attr(t, "d") {
-                let d = d.trim();
-                if !d.is_empty() {
-                    out.push(Shape::Path(d.to_string()));
-                }
+            let d = attr(t, "d")?.trim().to_string();
+            if d.is_empty() {
+                return None;
             }
+            ShapeKind::Path(d)
         }
         "line" => {
-            if let (Some(x1), Some(y1), Some(x2), Some(y2)) =
-                (attr(t, "x1"), attr(t, "y1"), attr(t, "x2"), attr(t, "y2"))
-            {
-                out.push(Shape::Line {
-                    x1: f(&x1),
-                    y1: f(&y1),
-                    x2: f(&x2),
-                    y2: f(&y2),
-                });
-            }
+            let (x1, y1, x2, y2) = (attr(t, "x1")?, attr(t, "y1")?, attr(t, "x2")?, attr(t, "y2")?);
+            ShapeKind::Line { x1: f(&x1), y1: f(&y1), x2: f(&x2), y2: f(&y2) }
         }
         "circle" => {
-            if let (Some(cx), Some(cy), Some(r)) = (attr(t, "cx"), attr(t, "cy"), attr(t, "r")) {
-                out.push(Shape::Circle {
-                    cx: f(&cx),
-                    cy: f(&cy),
-                    r: f(&r),
-                });
-            }
+            let (cx, cy, r) = (attr(t, "cx")?, attr(t, "cy")?, attr(t, "r")?);
+            ShapeKind::Circle { cx: f(&cx), cy: f(&cy), r: f(&r) }
         }
         "rect" => {
-            let (x, y, w, h, r) = if let (Some(x), Some(y), Some(w), Some(h)) =
-                (attr(t, "x"), attr(t, "y"), attr(t, "width"), attr(t, "height"))
-            {
-                (
-                    f(&x),
-                    f(&y),
-                    f(&w),
-                    f(&h),
-                    attr(t, "rx").map(|v| f(&v)).unwrap_or(0.0),
-                )
-            } else {
-                return;
-            };
-            out.push(Shape::Rect { x, y, w, h, r });
-        }
-        "polyline" => {
-            if let Some(pts) = attr(t, "points") {
-                out.push(Shape::Polyline(numbers(&pts).chunks(2).map(|c| (c[0], c[1])).collect()));
+            let (x, y, w, h) = (
+                attr(t, "x")?,
+                attr(t, "y")?,
+                attr(t, "width")?,
+                attr(t, "height")?,
+            );
+            ShapeKind::Rect {
+                x: f(&x),
+                y: f(&y),
+                w: f(&w),
+                h: f(&h),
+                r: attr(t, "rx").map(|v| f(&v)).unwrap_or(0.0),
             }
         }
-        _ => {}
-    }
+        "polyline" => {
+            let pts = attr(t, "points")?;
+            ShapeKind::Polyline(numbers(&pts).chunks(2).map(|c| (c[0], c[1])).collect())
+        }
+        _ => return None,
+    };
+    Some((style, kind))
 }
 
 fn attr(t: &str, key: &str) -> Option<String> {
-    // 找 key="..." 喵(允许单引号)喵
+    // 必须匹配「key=」整体,避免 key 是元素名/其他属性子串的误命中喵
+    // (经典翻车: 在 "circle" 里找 "r",撞上元素名直接失败)喵
+    let pattern = format!("{key}=");
     let mut rest = t;
     loop {
-        let idx = rest.find(key)?;
-        let after = &rest[idx + key.len()..];
-        let eq = after.strip_prefix('=')?;
-        let q = eq.chars().next()?;
+        let idx = rest.find(&pattern)?;
+        let after = &rest[idx + pattern.len()..];
+        let q = after.chars().next()?;
         if q != '"' && q != '\'' {
             rest = &rest[idx + 1..];
             continue;
         }
-        let span = &eq[1..];
+        let span = &after[1..];
         let end = span.find(q)?;
         return Some(span[..end].trim().to_string());
     }

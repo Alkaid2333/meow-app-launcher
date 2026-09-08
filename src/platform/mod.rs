@@ -12,6 +12,8 @@
 
 pub mod win32;
 
+use serde::{Deserialize, Serialize};
+
 /// 提取到的图标像素喵(BGRA 格式,自顶向下)喵
 #[derive(Debug, Clone)]
 pub struct IconPixels {
@@ -158,6 +160,32 @@ pub trait GpuContext {
     fn valid(&self) -> bool;
 }
 
+/// 系统命令喵(仅内置预定义集合,不接受任意输入,安全边界清晰)喵
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemCommandKind {
+    /// 锁屏喵
+    Lock,
+    /// 睡眠喵
+    Sleep,
+    /// 关机喵
+    Shutdown,
+    /// 重启喵
+    Restart,
+}
+
+impl SystemCommandKind {
+    /// 给搜索结果看的名字喵(唯一出处,配置 GUI 也用它)喵
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Lock => "锁屏",
+            Self::Sleep => "睡眠",
+            Self::Shutdown => "关机",
+            Self::Restart => "重启",
+        }
+    }
+}
+
 /// 平台能力接口喵
 pub trait Platform: Send + Sync {
     /// 从文件路径提取图标像素喵,失败返回 None(渲染层兜底字符图标)喵
@@ -171,6 +199,16 @@ pub trait Platform: Send + Sync {
 
     /// 启动一个应用(路径可以是 exe/lnk/url/任意可执行类型)喵,返回是否成功喵
     fn launch(&self, path: &str) -> bool;
+
+    /// 打开链接喵: `browser` 为空走系统默认;
+    /// 非空时按浏览器路径启动(支持引号包裹与 `%1` 占位符)喵
+    fn open_url(&self, url: &str, browser: &str) -> bool;
+
+    /// 把文本放入系统剪贴板喵,返回是否成功喵
+    fn copy_to_clipboard(&self, text: &str) -> bool;
+
+    /// 执行内置系统命令喵(锁屏/睡眠/关机/重启),返回是否成功喵
+    fn execute_system_command(&self, command: SystemCommandKind) -> bool;
 
     /// 注册全局热键喵,触发时向 `target` 窗口投递 Hotkey 事件喵
     fn register_global_hotkey(
@@ -224,7 +262,7 @@ pub trait Platform: Send + Sync {
     /// 设置定时器喵(驱动动画帧,间隔毫秒)喵
     fn set_timer(&self, window: &PlatformWindow, interval_ms: u32);
 
-    /// 创建系统托盘图标喵(不绑定事件处理器)喵
+    /// 创建系统托盘图标喵(自带应用图标与提示,不绑定事件处理器)喵
     fn create_tray(&self) -> Option<TrayHandle>;
 
     /// 绑定托盘事件处理器喵(托盘创建后调用一次)喵
@@ -233,8 +271,14 @@ pub trait Platform: Send + Sync {
     /// 移除托盘图标喵
     fn destroy_tray(&self, tray: &TrayHandle);
 
-    /// 更新托盘图标(BGRA 像素)喵
-    fn set_tray_icon(&self, tray: &TrayHandle, width: u32, height: u32, bgra: &[u8]);
+    /// 重新应用托盘图标喵(explorer 重启等场景由平台层自动调用,业务层一般不用)喵
+    fn set_tray_app_icon(&self, tray: &TrayHandle);
+
+    /// 尝试成为单实例喵(已有多余实例在跑时返回 false)喵
+    fn try_acquire_single_instance(&self) -> bool;
+
+    /// 通知已运行的实例唤起搜索框喵(配合单实例保护,再次启动 = 呼出喵)喵
+    fn notify_existing_instance(&self);
 
     /// 更新托盘提示文本喵
     fn set_tray_tip(&self, tray: &TrayHandle, tip: &str);
