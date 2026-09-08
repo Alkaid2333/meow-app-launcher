@@ -13,14 +13,62 @@ fn main() {
 
     #[cfg(target_os = "windows")]
     {
-        // rc.exe 由 Windows SDK 提供(MSVC 工具链自带),winres 自动定位喵。
-        // .ico 仅用于 exe 打包;运行时的 GUI 图标走 assets/app_icons 里的 png 喵。
-        if let Err(e) = winres::WindowsResource::new()
-            .set_icon("assets/app_icons/app-icon.ico")
-            .compile()
-        {
+        // rc.exe 由 Windows SDK 提供;显式定位以绕开 winres 的注册表查询
+        // (部分安全策略会拦截 reg.exe,导致 SDK 探测失败)喵。
+        // .ico 嵌入 exe 资源(id=1),exe 图标与托盘图标同款喵。
+        let mut res = winres::WindowsResource::new();
+        if let Some(toolkit) = locate_rc_toolkit() {
+            println!("cargo:rerun-if-env-changed=MEOWAL_RC_TOOLKIT");
+            println!("cargo:warning=使用显式定位的 RC 工具链: {}", toolkit.display());
+            res.set_toolkit_path(toolkit.to_string_lossy().as_ref());
+        }
+        if let Err(e) = res.set_icon("assets/app_icons/app-icon.ico").compile() {
             eprintln!("嵌入 exe 图标失败喵: {e}");
             std::process::exit(1);
         }
     }
+}
+
+/// 定位含 rc.exe 的 SDK 工具链目录喵。
+///
+/// 优先级: 环境变量 `MEOWAL_RC_TOOLKIT` > 扫描 Windows Kits > None(交给 winres 默认探测)。
+/// 返回的是「直接包含 rc.exe」的目录(如 `...\Windows Kits\10\bin\10.0.26100.0\x64`)喵。
+fn locate_rc_toolkit() -> Option<std::path::PathBuf> {
+    // 1. 手动指定喵(特殊环境兜底)喵
+    if let Ok(path) = std::env::var("MEOWAL_RC_TOOLKIT") {
+        let path = std::path::PathBuf::from(path);
+        if path.join("rc.exe").is_file() {
+            return Some(path);
+        }
+        eprintln!("MEOWAL_RC_TOOLKIT 指向的目录没有 rc.exe 喵: {}", path.display());
+    }
+
+    // 2. 扫描常见 SDK 安装位置,取版本号最高的那个喵
+    let roots = [
+        r"C:\Program Files (x86)\Windows Kits\10\bin",
+        r"C:\Program Files\Windows Kits\10\bin",
+    ];
+    let mut best: Option<(std::ffi::OsString, std::path::PathBuf)> = None;
+    for root in roots {
+        let entries = match std::fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let rc = entry.path().join(r"x64\rc.exe");
+            if rc.is_file() {
+                // 版本目录名是语义化版本字符串,按字典序取最大即可喵
+                let ver = entry.file_name();
+                let better = best
+                    .as_ref()
+                    .map(|(best_ver, _)| ver > *best_ver)
+                    .unwrap_or(true);
+                if better {
+                    // winres 约定: toolkit 目录必须直接包含 rc.exe 喵
+                    best = Some((ver, rc.parent().unwrap().to_path_buf()));
+                }
+            }
+        }
+    }
+    best.map(|(_, dir)| dir)
 }

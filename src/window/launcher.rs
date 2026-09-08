@@ -313,7 +313,7 @@ impl Launcher {
     /// 导航键按下喵(网格走几何导航,列表走线性跳步)喵
     fn on_key(&mut self, key: Key) {
         match key {
-            Key::Enter => self.launch_selected(),
+            Key::Enter => self.execute_selected(),
             Key::Escape => {
                 if self.island.state == crate::animation::IslandState::Expanded {
                     self.island.go(true, false);
@@ -383,6 +383,8 @@ impl Launcher {
             self.just_dragged = false;
             return;
         }
+        // 点击即抢回键盘焦点: 呼出时若被前台锁拒绝,靠点击自救喵
+        self.platform.focus_window(&self.window);
         let scale = self.platform.scale_factor();
         let layout = self.current_layout(scale);
 
@@ -433,7 +435,7 @@ impl Launcher {
                     return;
                 }
                 self.state.borrow_mut().selected = i;
-                self.launch_selected();
+                self.execute_selected();
                 return;
             }
         }
@@ -486,7 +488,8 @@ impl Launcher {
                     .enumerate()
                     .find(|(_, r)| r.left <= x && x <= r.right && r.top <= y && y <= r.bottom)
                 {
-                    let is_app = matches!(self.state.borrow().results.get(i), Some(ListItem::App(_)));
+                    let is_app =
+                        matches!(self.state.borrow().results.get(i), Some(ListItem::Item(_)));
                     if is_app && self.state.borrow().selected != i {
                         self.state.borrow_mut().selected = i;
                         log::debug!("悬停吸附选中: {} 喵", i);
@@ -678,11 +681,11 @@ impl Launcher {
         self.request_render();
     }
 
-    /// 启动选中的应用并隐藏喵
-    fn launch_selected(&mut self) {
-        let launched = self.state.borrow_mut().launch_selected();
-        if launched.is_none() {
-            log::debug!("没有可启动的应用喵");
+    /// 执行选中条目的动作并隐藏喵
+    fn execute_selected(&mut self) {
+        let executed = self.state.borrow_mut().execute_selected();
+        if executed.is_none() {
+            log::debug!("没有可执行的条目喵");
         }
         self.hide();
     }
@@ -768,7 +771,10 @@ impl Launcher {
             .results
             .iter()
             .filter_map(|i| match i {
-                ListItem::App(app) => Some(app.clone()),
+                ListItem::Item(item) => match &item.icon {
+                    crate::search::ItemIcon::App(app) => Some(app.clone()),
+                    crate::search::ItemIcon::Builtin(_) => None,
+                },
                 ListItem::Section(_) => None,
             })
             .collect();

@@ -6,14 +6,20 @@
 //! * Tag 模式: `t: xxx` 按标签搜索喵
 //! * 首字母模式: `i: a b c` 按首字母搜索喵
 
+pub mod calc;
 pub mod fuzzy;
+pub mod item;
+pub mod provider;
+
+pub use item::{Action, BuiltinIcon, ItemIcon, Scored, SearchItem};
+pub use provider::{builtin_providers, ProviderContext, SearchProvider};
 
 use crate::apps::AppInfo;
 use pinyin::ToPinyin;
 use std::collections::HashMap;
 
 /// 搜索结果条数上限喵
-const MAX_RESULTS: usize = 30;
+pub const MAX_RESULTS: usize = 30;
 
 /// 搜索模式喵
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +30,11 @@ pub enum SearchMode {
     Tag,
     /// 按首字母搜索喵
     Initial,
+}
+
+/// 判定查询属于哪种模式喵(多源聚合只在名称模式下注入计算器/Web/命令)喵
+pub fn query_mode(input: &str) -> SearchMode {
+    ParsedQuery::parse(input).mode
 }
 
 /// 解析后的查询喵
@@ -159,6 +170,19 @@ impl SearchEngine {
         config: &crate::app::config::AppConfig,
         input: &str,
     ) -> Vec<&'a AppInfo> {
+        self.search_scored(registry, config, input)
+            .into_iter()
+            .map(|(app, _)| app)
+            .collect()
+    }
+
+    /// 带分数版搜索喵(多源聚合需要分数混排;不做截断,由聚合层统一收口)喵
+    pub fn search_scored<'a>(
+        &self,
+        registry: &'a crate::apps::AppRegistry,
+        config: &crate::app::config::AppConfig,
+        input: &str,
+    ) -> Vec<(&'a AppInfo, f32)> {
         let parsed = ParsedQuery::parse(input);
         if parsed.is_empty() {
             return Vec::new();
@@ -179,8 +203,7 @@ impl SearchEngine {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.0.name.cmp(&b.0.name))
         });
-        scored.truncate(MAX_RESULTS);
-        scored.into_iter().map(|(app, _)| app).collect()
+        scored
     }
 
     /// 计算单个应用对查询的匹配分数喵

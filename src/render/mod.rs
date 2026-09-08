@@ -11,6 +11,7 @@
 //! * `paint` 场景绘制喵
 
 pub mod font;
+pub mod icon;
 pub mod layout;
 pub mod paint;
 pub mod settings;

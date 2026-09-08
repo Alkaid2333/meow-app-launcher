@@ -8,14 +8,14 @@
 //! 不是 tuple struct,所以直接用指针、跨线程存储时转 usize 喵。
 
 use super::{
-    GpuContext, IconPixels, Key, Platform, PlatformWindow, TrayEvent, TrayHandle, TrayHandler,
-    TrayMenuItem, WindowEvent, WindowHandler, WindowSpec,
+    GpuContext, IconPixels, Key, Platform, PlatformWindow, SystemCommandKind, TrayEvent,
+    TrayHandle, TrayHandler, TrayMenuItem, WindowEvent, WindowHandler, WindowSpec,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem::{size_of, zeroed};
 use std::ptr::null_mut;
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex, Once, OnceLock};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::UI::WindowsAndMessaging::HICON;
@@ -107,6 +107,18 @@ impl Platform for Win32Platform {
 
     fn launch(&self, path: &str) -> bool {
         launch_impl(path)
+    }
+
+    fn open_url(&self, url: &str, browser: &str) -> bool {
+        open_url_impl(url, browser)
+    }
+
+    fn copy_to_clipboard(&self, text: &str) -> bool {
+        copy_to_clipboard_impl(text)
+    }
+
+    fn execute_system_command(&self, command: SystemCommandKind) -> bool {
+        execute_system_command_impl(command)
     }
 
     fn register_global_hotkey(
@@ -224,9 +236,37 @@ impl Platform for Win32Platform {
     }
 
     fn focus_window(&self, window: &PlatformWindow) {
-        use windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+        use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
+        };
+
+        let hwnd = window.hwnd() as HWND;
         unsafe {
-            SetForegroundWindow(window.hwnd() as HWND);
+            // 已是前台就不折腾了喵
+            if GetForegroundWindow() == hwnd {
+                return;
+            }
+            // 前台锁自救: Windows 会拒绝后台进程抢前台(启动外部应用后必被拒)。
+            // 附加到前台线程的输入队列,即可合法完成切换喵。
+            let fg = GetForegroundWindow();
+            let fg_thread = if fg.is_null() {
+                0
+            } else {
+                GetWindowThreadProcessId(fg, null_mut())
+            };
+            let cur_thread = GetCurrentThreadId();
+            let attached = fg_thread != 0 && fg_thread != cur_thread;
+            if attached {
+                AttachThreadInput(cur_thread, fg_thread, 1);
+            }
+            let ok = SetForegroundWindow(hwnd) != 0;
+            if attached {
+                AttachThreadInput(cur_thread, fg_thread, 0);
+            }
+            if !ok {
+                log::debug!("SetForegroundWindow 被前台锁拒绝(已尝试附加输入线程)喵~");
+            }
         }
     }
 
@@ -289,6 +329,21 @@ impl Platform for Win32Platform {
             register_tray_class();
         });
 
+        // 注册 TaskbarCreated 广播消息(explorer 重启后重建托盘图标用)喵
+        WM_TRAY_TASKBAR.get_or_init(|| {
+            let name: Vec<u16> = "TaskbarCreated\0".encode_utf16().collect();
+            unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW(name.as_ptr())
+            }
+        });
+
+        // 从 exe 资源加载应用图标(build.rs 嵌入的 app-icon.ico,和 exe 图标同款)喵
+        let (sw, sh) = small_icon_size();
+        let hicon = app_icon_hicon(sw, sh);
+        if hicon.is_null() {
+            log::warn!("托盘应用图标加载失败,托盘将以无图标形式创建喵~");
+        }
+
         unsafe {
             let hwnd = windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
                 0,
@@ -309,15 +364,20 @@ impl Platform for Win32Platform {
                 return None;
             }
 
-            // 添加托盘图标喵
+            // 添加托盘图标喵(一次性带上 回调消息 + 图标 + 提示,避免先出现空槽)喵
             let mut nid: NOTIFYICONDATAW = zeroed();
             nid.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
             nid.hWnd = hwnd;
             nid.uID = 1;
-            nid.uFlags = NIF_MESSAGE;
+            nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
             nid.uCallbackMessage = WM_TRAY_MSG;
+            nid.hIcon = hicon;
+            set_nid_tip(&mut nid, "meow app launcher");
             if Shell_NotifyIconW(NIM_ADD, &nid) == 0 {
                 log::error!("添加托盘图标失败喵");
+                if !hicon.is_null() {
+                    windows_sys::Win32::UI::WindowsAndMessaging::DestroyIcon(hicon);
+                }
                 windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
                 return None;
             }
@@ -326,7 +386,7 @@ impl Platform for Win32Platform {
             TRAY_STATE.with(|s| {
                 *s.borrow_mut() = Some(TrayState {
                     hwnd: hwnd as usize,
-                    icon: null_mut(),
+                    icon: hicon,
                     menu: Vec::new(),
                 });
             });
@@ -359,10 +419,11 @@ impl Platform for Win32Platform {
         log::debug!("托盘已移除喵");
     }
 
-    fn set_tray_icon(&self, _tray: &TrayHandle, width: u32, height: u32, bgra: &[u8]) {
-        let hicon = pixels_to_hicon(width, height, bgra);
+    fn set_tray_app_icon(&self, _tray: &TrayHandle) {
+        let (sw, sh) = small_icon_size();
+        let hicon = app_icon_hicon(sw, sh);
         if hicon.is_null() {
-            log::warn!("托盘图标创建失败喵");
+            log::warn!("托盘应用图标加载失败喵~");
             return;
         }
 
@@ -386,6 +447,50 @@ impl Platform for Win32Platform {
         if !old_icon.is_null() {
             unsafe {
                 windows_sys::Win32::UI::WindowsAndMessaging::DestroyIcon(old_icon);
+            }
+        }
+    }
+
+    fn try_acquire_single_instance(&self) -> bool {
+        use windows_sys::Win32::System::Threading::CreateMutexW;
+        use windows_sys::Win32::Foundation::ERROR_ALREADY_EXISTS;
+
+        // 命名互斥体: 句柄故意常驻进程,退出时由系统回收喵
+        let name: Vec<u16> = "Local\\MeowAppLauncher.SingleInstance\0"
+            .encode_utf16()
+            .collect();
+        unsafe {
+            let handle = CreateMutexW(null_mut(), 0, name.as_ptr());
+            if handle.is_null() {
+                log::warn!(
+                    "单实例互斥体创建失败(rc={}),放行启动喵~",
+                    windows_sys::Win32::Foundation::GetLastError()
+                );
+                return true;
+            }
+            SINGLE_INSTANCE_MUTEX.store(handle as usize, std::sync::atomic::Ordering::SeqCst);
+            let already =
+                windows_sys::Win32::Foundation::GetLastError() == ERROR_ALREADY_EXISTS;
+            if already {
+                log::info!("检测到已有实例在运行喵~");
+            }
+            !already
+        }
+    }
+
+    fn notify_existing_instance(&self) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            FindWindowW, PostMessageW,
+        };
+
+        // 找到主窗口,投递热键同款消息 → 已运行实例直接呼出搜索框喵
+        unsafe {
+            let hwnd = FindWindowW(CLASS_NAME.as_ptr(), std::ptr::null());
+            if !hwnd.is_null() {
+                PostMessageW(hwnd, WM_MEOW_HOTKEY, 0, 0);
+                log::info!("已通知现有实例唤起搜索框喵~");
+            } else {
+                log::warn!("未找到现有实例的主窗口喵~");
             }
         }
     }
@@ -630,6 +735,37 @@ unsafe extern "system" fn tray_wnd_proc(
     };
 
     match msg {
+        // explorer 重启/启动时会广播 TaskbarCreated,托盘图标会丢,这里重建喵
+        msg if Some(msg) == WM_TRAY_TASKBAR.get().copied() => {
+            log::debug!("收到 TaskbarCreated 广播,重建托盘图标喵~");
+            let (sw, sh) = small_icon_size();
+            let hicon = app_icon_hicon(sw, sh);
+            if !hicon.is_null() {
+                TRAY_STATE.with(|s| {
+                    if let Some(state) = s.borrow_mut().as_mut() {
+                        let old = std::mem::replace(&mut state.icon, hicon);
+                        unsafe {
+                            let mut nid: NOTIFYICONDATAW = zeroed();
+                            nid.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
+                            nid.hWnd = state.hwnd as HWND;
+                            nid.uID = 1;
+                            nid.uFlags = NIF_ICON;
+                            nid.hIcon = hicon;
+                            // 旧图标槽位已随 explorer 消失,用 NIM_ADD 重建喵
+                            if Shell_NotifyIconW(NIM_ADD, &nid) == 0 {
+                                Shell_NotifyIconW(NIM_MODIFY, &nid);
+                            }
+                        }
+                        if !old.is_null() {
+                            unsafe {
+                                windows_sys::Win32::UI::WindowsAndMessaging::DestroyIcon(old);
+                            }
+                        }
+                    }
+                });
+            }
+            0
+        }
         // 托盘回调消息喵
         WM_TRAY_MSG => {
             let event = (lparam & 0xFFFF) as u32;
@@ -1407,90 +1543,40 @@ fn present_impl(hwnd: HWND, width: i32, height: i32, bgra: &[u8]) {
 }
 
 // ---------------------------------------------------------------------------
-// 托盘图标: BGRA 像素 → HICON
+// 托盘图标: exe 内嵌资源 → HICON
 // ---------------------------------------------------------------------------
 
-/// 把 BGRA 像素转成 HICON 喵(带 alpha)喵
-fn pixels_to_hicon(width: u32, height: u32, bgra: &[u8]) -> HICON {
-    use windows_sys::Win32::Graphics::Gdi::{
-        BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CreateDIBSection, DeleteObject, DIB_RGB_COLORS,
-        GetDC, ReleaseDC,
-    };
-    use windows_sys::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, ICONINFO};
+/// 单实例互斥体句柄喵(进程存活期间常驻,退出时由系统回收)喵
+static SINGLE_INSTANCE_MUTEX: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// TaskbarCreated 广播消息 id 喵(explorer 重启/启动时广播,懒注册)喵
+static WM_TRAY_TASKBAR: OnceLock<u32> = OnceLock::new();
 
-    if width == 0 || height == 0 {
-        return null_mut();
-    }
+/// 托盘小图标的目标尺寸喵(跟随系统 DPI)喵
+fn small_icon_size() -> (i32, i32) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSMICON, SM_CYSMICON};
+    unsafe { (
+        GetSystemMetrics(SM_CXSMICON).max(16),
+        GetSystemMetrics(SM_CYSMICON).max(16),
+    ) }
+}
+
+/// 从 exe 资源加载应用图标喵(winres 嵌入的 app-icon.ico,资源 id = 1)喵
+fn app_icon_hicon(width: i32, height: i32) -> HICON {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{LoadImageW, IMAGE_ICON, LR_DEFAULTCOLOR};
 
     unsafe {
-        let screen_dc = GetDC(null_mut());
-
-        // 32bpp 彩色 DIB(含 alpha,自顶向下)喵
-        let mut color_bmi: BITMAPINFO = zeroed();
-        color_bmi.bmiHeader = BITMAPINFOHEADER {
-            biSize: size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: width as i32,
-            biHeight: -(height as i32),
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB,
-            ..zeroed()
-        };
-        let mut color_bits: *mut std::ffi::c_void = null_mut();
-        let hbm_color = CreateDIBSection(
-            screen_dc,
-            &color_bmi,
-            DIB_RGB_COLORS,
-            &mut color_bits,
-            null_mut(),
-            0,
-        );
-        if !color_bits.is_null() {
-            let len = (width * height * 4) as usize;
-            std::ptr::copy_nonoverlapping(bgra.as_ptr(), color_bits as *mut u8, len.min(bgra.len()));
-        }
-
-        // 1bpp AND mask(全 0 = 不透明)喵
-        let mask_stride = (width.div_ceil(16) * 2) as usize;
-        let and_mask = vec![0u8; mask_stride * height as usize];
-        let mut mask_bmi: BITMAPINFO = zeroed();
-        mask_bmi.bmiHeader = BITMAPINFOHEADER {
-            biSize: size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: width as i32,
-            biHeight: -(height as i32),
-            biPlanes: 1,
-            biBitCount: 1,
-            biCompression: BI_RGB,
-            ..zeroed()
-        };
-        let mut mask_bits: *mut std::ffi::c_void = null_mut();
-        let hbm_mask = CreateDIBSection(
-            screen_dc,
-            &mask_bmi,
-            DIB_RGB_COLORS,
-            &mut mask_bits,
-            null_mut(),
-            0,
-        );
-        if !mask_bits.is_null() {
-            std::ptr::copy_nonoverlapping(and_mask.as_ptr(), mask_bits as *mut u8, and_mask.len());
-        }
-
-        let icon_info = ICONINFO {
-            fIcon: 1,
-            xHotspot: 0,
-            yHotspot: 0,
-            hbmMask: hbm_mask,
-            hbmColor: hbm_color,
-        };
-        let hicon = CreateIconIndirect(&icon_info);
-
-        DeleteObject(hbm_color);
-        DeleteObject(hbm_mask);
-        ReleaseDC(null_mut(), screen_dc);
-
-        hicon
+        let hmod = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(null_mut());
+        // 资源名按整数 id 传递(等价 MAKEINTRESOURCE(1))喵
+        LoadImageW(hmod, 1usize as *const u16, IMAGE_ICON, width, height, LR_DEFAULTCOLOR) as HICON
     }
+}
+
+/// 往 NOTIFYICONDATAW 写提示文本喵(szTip 定长 128 wchar)喵
+fn set_nid_tip(nid: &mut NOTIFYICONDATAW, tip: &str) {
+    let mut wide: Vec<u16> = tip.encode_utf16().collect();
+    wide.truncate(127);
+    wide.push(0);
+    nid.szTip[..wide.len()].copy_from_slice(&wide);
 }
 
 // ---------------------------------------------------------------------------
@@ -1788,6 +1874,185 @@ fn extract_icon_pixels_impl(path: &str) -> Option<IconPixels> {
 // ---------------------------------------------------------------------------
 
 /// 用 ShellExecuteW 打开任意文件/快捷方式/链接喵
+/// 打开链接喵: 浏览器为空走系统默认;否则启动指定浏览器喵
+///
+/// 浏览器配置支持两种写法喵:
+/// * 纯路径: `C:\...\chrome.exe`(URL 直接作为参数)喵
+/// * 带占位符: `"C:\Program Files\...\firefox.exe" --new-window %1` 喵
+fn open_url_impl(url: &str, browser: &str) -> bool {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let browser = browser.trim();
+    if browser.is_empty() {
+        return launch_impl(url);
+    }
+
+    // 拆 exe 与参数: 引号包裹的路径优先,否则按第一个空格切喵
+    let (exe, mut params): (String, String) = if let Some(rest) = browser.strip_prefix('"')
+        && let Some(end) = rest.find('"')
+    {
+        (rest[..end].to_string(), rest[end + 1..].trim().to_string())
+    } else if let Some(space) = browser.find(' ') {
+        (browser[..space].to_string(), browser[space + 1..].trim().to_string())
+    } else {
+        (browser.to_string(), String::new())
+    };
+
+    // %1 占位符 = URL 插入位;没有占位符就追加到参数尾部喵
+    if params.contains("%1") {
+        params = params.replace("%1", url);
+    } else if params.is_empty() {
+        params.push_str(url);
+    } else {
+        params.push(' ');
+        params.push_str(url);
+    }
+
+    let exe_wide: Vec<u16> = exe.encode_utf16().chain(Some(0)).collect();
+    let params_wide: Vec<u16> = params.encode_utf16().chain(Some(0)).collect();
+    let result = unsafe {
+        ShellExecuteW(
+            null_mut(),
+            null_mut(),
+            exe_wide.as_ptr(),
+            params_wide.as_ptr(),
+            null_mut(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if (result as isize) > 32 {
+        log::info!("已用自定义浏览器打开链接: {browser} ← {url} 喵");
+        true
+    } else {
+        log::warn!("自定义浏览器打开失败(code={}),回退系统默认喵~", result as isize);
+        launch_impl(url)
+    }
+}
+
+/// 把文本放入系统剪贴板喵(CF_UNICODETEXT,UTF-16)喵
+fn copy_to_clipboard_impl(text: &str) -> bool {
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    // CF 常量族在 Ole 模块里喵(历史包袱,别问喵)
+    use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
+    use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    wide.push(0);
+    let bytes = wide.len() * 2;
+
+    unsafe {
+        if OpenClipboard(null_mut()) == 0 {
+            log::warn!("剪贴板打开失败,复制取消喵~");
+            return false;
+        }
+        EmptyClipboard();
+        let handle: HANDLE = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        let ok = if handle.is_null() {
+            log::warn!("剪贴板内存分配失败喵~");
+            false
+        } else {
+            let dst = GlobalLock(handle) as *mut u16;
+            if dst.is_null() {
+                log::warn!("剪贴板内存锁定失败喵~");
+                false
+            } else {
+                std::ptr::copy_nonoverlapping(wide.as_ptr(), dst, wide.len());
+                GlobalUnlock(handle);
+                // 写入成功后剪贴板接管句柄,不许再 GlobalFree 喵
+                !SetClipboardData(CF_UNICODETEXT as u32, handle).is_null()
+            }
+        };
+        CloseClipboard();
+        if ok {
+            log::debug!("已复制 {} 个字符到剪贴板喵~", text.chars().count());
+        } else {
+            log::warn!("剪贴板写入失败喵~");
+        }
+        ok
+    }
+}
+
+/// 执行内置系统命令喵(锁屏/睡眠/关机/重启)喵
+fn execute_system_command_impl(command: SystemCommandKind) -> bool {
+    match command {
+        SystemCommandKind::Lock => {
+            let ok = unsafe { windows_sys::Win32::System::Shutdown::LockWorkStation() != 0 };
+            log::info!("执行系统命令: 锁屏,成功={ok} 喵");
+            ok
+        }
+        SystemCommandKind::Sleep => {
+            // SetSuspendState(休眠=false, 强制=false, 禁唤醒=false)喵
+            let ok = unsafe { windows_sys::Win32::System::Power::SetSuspendState(0, 0, 0) != 0 };
+            log::info!("执行系统命令: 睡眠,成功={ok} 喵");
+            ok
+        }
+        SystemCommandKind::Shutdown | SystemCommandKind::Restart => {
+            exit_windows_impl(matches!(command, SystemCommandKind::Restart))
+        }
+    }
+}
+
+/// 关机/重启喵: 申请 SeShutdownPrivilege 特权后 ExitWindowsEx 喵
+/// (不借道 shutdown.exe,避免控制台闪窗喵)喵
+fn exit_windows_impl(restart: bool) -> bool {
+    use windows_sys::Win32::Foundation::{ERROR_SUCCESS, HANDLE, LUID};
+    use windows_sys::Win32::Security::{
+        AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
+        TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Shutdown::{
+        EWX_POWEROFF, EWX_REBOOT, EWX_SHUTDOWN, ExitWindowsEx,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let flags = if restart { EWX_REBOOT } else { EWX_SHUTDOWN | EWX_POWEROFF };
+    unsafe {
+        let mut token: HANDLE = null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token)
+            == 0
+        {
+            log::warn!("关机/重启失败: 打开进程令牌不成功喵~");
+            return false;
+        }
+        let privilege: Vec<u16> = "SeShutdownPrivilege\0".encode_utf16().collect();
+        let mut luid: LUID = zeroed();
+        if LookupPrivilegeValueW(std::ptr::null(), privilege.as_ptr(), &mut luid) == 0 {
+            log::warn!("关机/重启失败: 查询关机特权不成功喵~");
+            return false;
+        }
+        let tp = TOKEN_PRIVILEGES {
+            PrivilegeCount: 1,
+            Privileges: [LUID_AND_ATTRIBUTES {
+                Luid: luid,
+                Attributes: SE_PRIVILEGE_ENABLED,
+            }],
+        };
+        AdjustTokenPrivileges(token, 0, &tp, 0, null_mut(), null_mut());
+        // 未持有特权时 AdjustTokenPrivileges 返回非 0 但 ERROR_NOT_ALL_ASSIGNED,
+        // 不视为失败,交给 ExitWindowsEx 最终裁决喵
+        if windows_sys::Win32::Foundation::GetLastError() != ERROR_SUCCESS
+            && windows_sys::Win32::Foundation::GetLastError()
+                != windows_sys::Win32::Foundation::ERROR_NOT_ALL_ASSIGNED
+        {
+            log::debug!("关机特权申请未完全成功,继续尝试执行喵~");
+        }
+        let ok = ExitWindowsEx(flags, 0) != 0;
+        if ok {
+            log::info!("执行系统命令: {},成功喵~", if restart { "重启" } else { "关机" });
+        } else {
+            log::warn!(
+                "ExitWindowsEx 失败(rc={})喵~",
+                windows_sys::Win32::Foundation::GetLastError()
+            );
+        }
+        ok
+    }
+}
+
 fn launch_impl(path: &str) -> bool {
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
