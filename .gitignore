@@ -1,4 +1,23 @@
+# ── 构建产物 ──
 /target
-/.datas
-/.tmp
 /output
+
+# ── 运行时数据(便携式,不随仓库分发) ──
+/.datas
+
+# ── 本地缓存(预构建 Skia 二进制等) ──
+/.tmp
+
+# ── 代码索引缓存 ──
+/.codegraph
+
+# ── AI 智能体工作区(开发记忆与 skills,不对外公开) ──
+/.agents
+
+# ── 编辑器 / 系统噪音 ──
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
