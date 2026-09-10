@@ -27,7 +27,7 @@ pub use paint::paint_scene;
 pub use theme::{SettingsTheme, Theme};
 
 use crate::app::config::RenderBackend;
-use crate::platform::{GpuContext, Platform};
+use crate::platform::{Win32Platform, WinGpuContext};
 use skia_safe::gpu::{self, DirectContext, SurfaceOrigin};
 use skia_safe::image::CachingHint;
 use skia_safe::surfaces;
@@ -63,7 +63,7 @@ pub struct Renderer {
     /// GPU 渲染上下文喵(仅 GPU 模式持有,负责加载 GL 函数 + 维持 current)喵
     context: Option<DirectContext>,
     /// 平台 GPU 上下文喵(负责 WGL 生命周期,须先于 context 释放)喵
-    gpu: Option<Box<dyn GpuContext>>,
+    gpu: Option<WinGpuContext>,
     width: i32,
     height: i32,
 }
@@ -73,7 +73,7 @@ impl Renderer {
     ///
     /// 请求 GPU 时优先尝试 GPU 后端,失败自动回退 CPU,
     /// 保证任何环境都能正常出画面喵。
-    pub fn new(width: i32, height: i32, backend: RenderBackend, platform: &dyn Platform) -> Option<Self> {
+    pub fn new(width: i32, height: i32, backend: RenderBackend, platform: &Win32Platform) -> Option<Self> {
         match backend {
             RenderBackend::Cpu => Self::new_cpu(width, height),
             RenderBackend::Gpu => match Self::new_gpu(width, height, platform) {
@@ -103,7 +103,7 @@ impl Renderer {
     }
 
     /// GPU 后端喵(Windows 走平台层 WGL 上下文 + OpenGL)喵
-    fn new_gpu(width: i32, height: i32, platform: &dyn Platform) -> Option<Self> {
+    fn new_gpu(width: i32, height: i32, platform: &Win32Platform) -> Option<Self> {
         #[cfg(feature = "gl")]
         {
             let gpu = platform.create_gpu_context()?;
@@ -111,11 +111,8 @@ impl Renderer {
                 log::warn!("GPU: 平台上下文无效或无法 current 喵");
                 return None;
             }
-            // 通过平台上下文加载 GL 函数(上下文已 current,可拿到 ICD 函数)喵
-            let interface = {
-                let gpu = &*gpu;
-                skia_safe::gpu::gl::Interface::new_load_with(|name| gpu.get_proc(name))?
-            };
+            let interface =
+                skia_safe::gpu::gl::Interface::new_load_with(|name| gpu.get_proc(name))?;
             if !interface.validate() {
                 log::warn!("OpenGL 接口校验失败,无法启用 GPU 喵");
                 return None;

@@ -2,11 +2,9 @@
 //!
 //! `assets/icons/` 下的 24×24 小图标素材,运行时经 `include_str!` 打进二进制,
 //! 不需要 skia `svg` feature(避免换预编译二进制),只解析用到的子集:
-//! `<path d="...">`(M/m、L/l、H/h、V/v、A/a、Z/z)、`<line>`、`<circle>`、
-//! `<rect rx>`、`<polyline>` 喵。圆弧按 SVG 端点→中心参数化采样成折线,视觉足够喵。
+//! `<path d>` 走 Skia `Path::from_svg`;另解析 `<line>` / `<circle>` / `<rect rx>` / `<polyline>` 喵。
 
 use skia_safe::{Canvas, Color, Paint, PaintStyle, Path, PathBuilder, Rect};
-use std::f32::consts::PI;
 use std::sync::OnceLock;
 
 /// 内置图标名 → 内嵌 SVG 源喵
@@ -91,11 +89,6 @@ pub fn icon(name: &str) -> &'static SvgIcon {
 }
 
 impl SvgIcon {
-    /// 可绘制元素数量喵(公开便于单测)喵
-    pub fn shapes_len(&self) -> usize {
-        self.shapes.len()
-    }
-
     /// 把图标画到目标矩形内喵(viewBox 等比缩放 + 居中,线稿/填充逐元素生效)喵
     pub fn draw(&self, canvas: &Canvas, rect: Rect, color: Color) {
         let (minx, miny, vw, vh) = self.view;
@@ -344,170 +337,8 @@ pub fn numbers(s: &str) -> Vec<f32> {
     out
 }
 
-// ---------------------------------------------------------------------------
-// SVG path 数据 → Skia Path 喵
-// ---------------------------------------------------------------------------
-
-/// 把 path 数据切成 (命令, 数字段) 序列喵(隐含的参数续用交给构建循环)喵
-fn tokenize(d: &str) -> Vec<(char, Vec<f32>)> {
-    let mut out = Vec::new();
-    let mut cmd = 'M';
-    let mut buf = String::new();
-    for c in d.chars() {
-        if c.is_ascii_alphabetic() {
-            if !buf.trim().is_empty() {
-                out.push((cmd, numbers(&buf)));
-                buf.clear();
-            }
-            cmd = c;
-        } else {
-            buf.push(c);
-        }
-    }
-    if !buf.trim().is_empty() {
-        out.push((cmd, numbers(&buf)));
-    }
-    out
-}
-
-/// 每个命令的参数个数喵
-fn params_per(cmd: char) -> usize {
-    match cmd {
-        'M' | 'L' => 2,
-        'H' | 'V' => 1,
-        'A' => 7,
-        _ => 0,
-    }
-}
-
 /// 解析 SVG path 的 d 属性喵(公开便于单测)喵
 pub fn build_path(d: &str) -> Path {
-    let mut b = PathBuilder::new();
-    let mut cur = (0.0_f32, 0.0_f32);
-    let mut start = cur;
-    let mut first = true;
-
-    for (cmd, nums) in tokenize(d) {
-        let rel = cmd.is_ascii_lowercase();
-        let major = cmd.to_ascii_uppercase();
-        if major == 'Z' {
-            b.close();
-            cur = start;
-            first = false;
-            continue;
-        }
-        let per = params_per(major);
-        if per == 0 {
-            continue;
-        }
-        let mut i = 0;
-        while i + per <= nums.len() {
-            match major {
-                'M' | 'L' => {
-                    let x = nums[i] + if rel { cur.0 } else { 0.0 };
-                    let y = nums[i + 1] + if rel { cur.1 } else { 0.0 };
-                    if major == 'M' && (first || i == 0) {
-                        b.move_to((x, y));
-                        start = (x, y);
-                        first = false;
-                    } else {
-                        b.line_to((x, y));
-                    }
-                    cur = (x, y);
-                }
-                'H' => {
-                    let x = nums[i] + if rel { cur.0 } else { 0.0 };
-                    b.line_to((x, cur.1));
-                    cur = (x, cur.1);
-                }
-                'V' => {
-                    let y = nums[i] + if rel { cur.1 } else { 0.0 };
-                    b.line_to((cur.0, y));
-                    cur = (cur.0, y);
-                }
-                'A' => {
-                    let end = (
-                        nums[i + 5] + if rel { cur.0 } else { 0.0 },
-                        nums[i + 6] + if rel { cur.1 } else { 0.0 },
-                    );
-                    arc_to(&mut b, cur, end, nums[i], nums[i + 1], nums[i + 2], nums[i + 3] != 0.0, nums[i + 4] != 0.0);
-                    cur = end;
-                }
-                _ => break,
-            }
-            i += per;
-        }
-    }
-    b.snapshot()
-}
-
-/// SVG 圆弧 → 采样折线喵(端点参数化 + 中心转换)喵
-#[allow(clippy::too_many_arguments)]
-fn arc_to(
-    b: &mut PathBuilder,
-    p0: (f32, f32),
-    end: (f32, f32),
-    rx: f32,
-    ry: f32,
-    rot_deg: f32,
-    large: bool,
-    sweep: bool,
-) {
-    let (x1, y1) = p0;
-    let (x2, y2) = end;
-    let mut rx = rx.abs().max(0.0001);
-    let mut ry = ry.abs().max(0.0001);
-    if (x1 - x2).abs() < 0.0001 && (y1 - y2).abs() < 0.0001 {
-        return;
-    }
-    let phi = rot_deg.to_radians();
-    let (cp, sp) = (phi.cos(), phi.sin());
-
-    let dx2 = (x1 - x2) / 2.0;
-    let dy2 = (y1 - y2) / 2.0;
-    let x1p = cp * dx2 + sp * dy2;
-    let y1p = -sp * dx2 + cp * dy2;
-
-    let l = x1p * x1p / (rx * rx) + y1p * y1p / (ry * ry);
-    if l > 1.0 {
-        let k = l.sqrt();
-        rx *= k;
-        ry *= k;
-    }
-    let num = (rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p).max(0.0);
-    let den = rx * rx * y1p * y1p + ry * ry * x1p * x1p;
-    let mut coef = if den <= 0.0 {
-        0.0
-    } else {
-        (num / den).sqrt()
-    };
-    if large == sweep {
-        coef = -coef;
-    }
-    let cxp = coef * (rx * y1p / ry);
-    let cyp = coef * (-ry * x1p / rx);
-    let cx = cp * cxp - sp * cyp + (x1 + x2) / 2.0;
-    let cy = sp * cxp + cp * cyp + (y1 + y2) / 2.0;
-
-    let ux = (x1p - cxp) / rx;
-    let uy = (y1p - cyp) / ry;
-    let vx = (-x1p - cxp) / rx;
-    let vy = (-y1p - cyp) / ry;
-
-    let mut delta = (ux * vy - uy * vx).atan2(ux * vx + uy * vy);
-    if !sweep && delta > 0.0 {
-        delta -= 2.0 * PI;
-    } else if sweep && delta < 0.0 {
-        delta += 2.0 * PI;
-    }
-
-    let steps = ((delta.abs() / (PI / 24.0)).ceil() as usize).clamp(3, 256);
-    for k in 1..=steps {
-        let a = delta * (k as f32 / steps as f32);
-        let (ca, sa) = (a.cos(), a.sin());
-        let x = cx + (rx * ca) * cp - (ry * sa) * sp;
-        let y = cy + (rx * ca) * sp + (ry * sa) * cp;
-        b.line_to((x, y));
-    }
+    Path::from_svg(d).unwrap_or_default()
 }
 

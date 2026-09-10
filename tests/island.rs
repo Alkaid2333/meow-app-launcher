@@ -147,7 +147,7 @@ fn 一步到位的两条转换() {
     assert_eq!(i.state, IslandState::Expanded);
     assert!((i.frame().width - 560.0).abs() < 0.01);
     assert!((i.frame().height - 268.0).abs() < 0.01);
-    assert!((i.morph() - 1.0).abs() < 0.001);
+    assert!((i.frame().morph - 1.0).abs() < 0.001);
 
     i.transition(IslandTransition::DismissExpanded);
     settle(&mut i);

@@ -572,11 +572,6 @@ impl DynamicIsland {
         self.springs.ty.jump(g.3);
     }
 
-    /// 当前形态进度（0 = 胶囊，1 = 扩展）
-    pub fn morph(&self) -> f64 {
-        self.springs.morph.value()
-    }
-
     /// 算出这一帧该怎么画
     pub fn frame(&self) -> IslandFrame {
         let c = &self.config;

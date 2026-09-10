@@ -11,7 +11,7 @@ use skia_safe::{Color, Paint};
 /// 用指定后端渲染一个满屏红色矩形,读回像素校验喵
 fn render_smoke(backend: RenderBackend) {
     let platform = platform();
-    let mut renderer = Renderer::new(64, 48, backend, &*platform)
+    let mut renderer = Renderer::new(64, 48, backend, &platform)
         .expect("渲染器初始化失败喵~");
     println!("后端 {} 实际生效: {} 喵", backend.label(), renderer.mode().label());
 

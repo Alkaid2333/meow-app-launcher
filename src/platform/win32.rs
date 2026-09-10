@@ -8,8 +8,8 @@
 //! 不是 tuple struct,所以直接用指针、跨线程存储时转 usize 喵。
 
 use super::{
-    GpuContext, IconPixels, Key, Platform, PlatformWindow, SystemCommandKind, TrayEvent,
-    TrayHandle, TrayHandler, TrayMenuItem, WindowEvent, WindowHandler, WindowSpec,
+    IconPixels, Key, PlatformWindow, SystemCommandKind, TrayEvent, TrayHandle, TrayHandler,
+    TrayMenuItem, WindowEvent, WindowHandler, WindowSpec,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -88,7 +88,6 @@ pub struct Win32Platform {
 
 impl Win32Platform {
     pub fn new() -> Self {
-        // 声明进程 DPI 感知,窗口尺寸/鼠标坐标都按物理像素处理喵
         enable_dpi_awareness();
         Self {
             hotkey_hwnd: Arc::new(Mutex::new(None)),
@@ -96,32 +95,38 @@ impl Win32Platform {
     }
 }
 
-impl Platform for Win32Platform {
-    fn extract_icon_pixels(&self, path: &str) -> Option<IconPixels> {
+impl Default for Win32Platform {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Win32Platform {
+    pub fn extract_icon_pixels(&self, path: &str) -> Option<IconPixels> {
         extract_icon_pixels_impl(path)
     }
 
-    fn create_gpu_context(&self) -> Option<Box<dyn GpuContext>> {
+    pub fn create_gpu_context(&self) -> Option<WinGpuContext> {
         create_gpu_context_impl()
     }
 
-    fn launch(&self, path: &str) -> bool {
+    pub fn launch(&self, path: &str) -> bool {
         launch_impl(path)
     }
 
-    fn open_url(&self, url: &str, browser: &str) -> bool {
+    pub fn open_url(&self, url: &str, browser: &str) -> bool {
         open_url_impl(url, browser)
     }
 
-    fn copy_to_clipboard(&self, text: &str) -> bool {
+    pub fn copy_to_clipboard(&self, text: &str) -> bool {
         copy_to_clipboard_impl(text)
     }
 
-    fn execute_system_command(&self, command: SystemCommandKind) -> bool {
+    pub fn execute_system_command(&self, command: SystemCommandKind) -> bool {
         execute_system_command_impl(command)
     }
 
-    fn register_global_hotkey(
+    pub fn register_global_hotkey(
         &self,
         modifiers: &str,
         key: &str,
@@ -158,7 +163,7 @@ impl Platform for Win32Platform {
         }
     }
 
-    fn unregister_global_hotkey(&self) {
+    pub fn unregister_global_hotkey(&self) {
         let hwnd = self.hotkey_hwnd.lock().unwrap().take();
         if let Some(hwnd) = hwnd {
             log::debug!("取消全局热键喵");
@@ -174,19 +179,17 @@ impl Platform for Win32Platform {
         }
     }
 
-    fn set_auto_start(&self, enabled: bool) -> bool {
+    pub fn set_auto_start(&self, enabled: bool) -> bool {
         set_auto_start_impl(enabled)
     }
 
-    fn install_cli_command(&self) -> bool {
+    pub fn install_cli_command(&self) -> bool {
         install_cli_command_impl()
     }
 
-    fn create_window(&self, spec: &WindowSpec) -> Option<PlatformWindow> {
+    pub fn create_window(&self, spec: &WindowSpec) -> Option<PlatformWindow> {
         // 确保窗口类已注册喵
-        CLASS_ONCE.call_once(|| {
-            register_class();
-        });
+        CLASS_ONCE.call_once(register_class);
 
         unsafe {
             let hwnd = windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
@@ -215,19 +218,19 @@ impl Platform for Win32Platform {
         }
     }
 
-    fn set_window_handler(&self, window: &PlatformWindow, handler: Box<dyn WindowHandler>) {
+    pub fn set_window_handler(&self, window: &PlatformWindow, handler: Box<dyn WindowHandler>) {
         HANDLERS.with(|handlers| {
             handlers.borrow_mut().insert(window.hwnd(), handler);
         });
     }
 
-    fn destroy_window(&self, window: &PlatformWindow) {
+    pub fn destroy_window(&self, window: &PlatformWindow) {
         unsafe {
             windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(window.hwnd() as HWND);
         }
     }
 
-    fn show_window(&self, window: &PlatformWindow, show: bool) {
+    pub fn show_window(&self, window: &PlatformWindow, show: bool) {
         use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOW};
         unsafe {
             // SW_SHOWNA: 显示但不抢焦点,避免分层窗闪一下又失焦喵
@@ -235,7 +238,7 @@ impl Platform for Win32Platform {
         }
     }
 
-    fn focus_window(&self, window: &PlatformWindow) {
+    pub fn focus_window(&self, window: &PlatformWindow) {
         use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
@@ -270,14 +273,14 @@ impl Platform for Win32Platform {
         }
     }
 
-    fn enable_file_drop(&self, window: &PlatformWindow) {
+    pub fn enable_file_drop(&self, window: &PlatformWindow) {
         use windows_sys::Win32::UI::Shell::DragAcceptFiles;
         unsafe {
             DragAcceptFiles(window.hwnd() as HWND, 1);
         }
     }
 
-    fn resize_window(&self, window: &PlatformWindow, width: i32, height: i32) {
+    pub fn resize_window(&self, window: &PlatformWindow, width: i32, height: i32) {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOZORDER,
         };
@@ -295,7 +298,7 @@ impl Platform for Win32Platform {
         let _ = SWP_NOZORDER;
     }
 
-    fn move_window(&self, window: &PlatformWindow, x: i32, y: i32) {
+    pub fn move_window(&self, window: &PlatformWindow, x: i32, y: i32) {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             SetWindowPos, HWND_TOPMOST, SWP_NOSIZE,
         };
@@ -312,18 +315,18 @@ impl Platform for Win32Platform {
         }
     }
 
-    fn present(&self, window: &PlatformWindow, width: i32, height: i32, bgra: &[u8]) {
+    pub fn present(&self, window: &PlatformWindow, width: i32, height: i32, bgra: &[u8]) {
         present_impl(window.hwnd() as HWND, width, height, bgra);
     }
 
-    fn set_timer(&self, window: &PlatformWindow, interval_ms: u32) {
+    pub fn set_timer(&self, window: &PlatformWindow, interval_ms: u32) {
         use windows_sys::Win32::UI::WindowsAndMessaging::SetTimer;
         unsafe {
             SetTimer(window.hwnd() as HWND, TIMER_ID, interval_ms, None);
         }
     }
 
-    fn create_tray(&self) -> Option<TrayHandle> {
+    pub fn create_tray(&self) -> Option<TrayHandle> {
         // 确保托盘窗口类已注册喵
         TRAY_CLASS_ONCE.call_once(|| {
             register_tray_class();
@@ -396,11 +399,11 @@ impl Platform for Win32Platform {
         }
     }
 
-    fn set_tray_handler(&self, _tray: &TrayHandle, handler: Box<dyn TrayHandler>) {
+    pub fn set_tray_handler(&self, _tray: &TrayHandle, handler: Box<dyn TrayHandler>) {
         TRAY_HANDLER.with(|h| *h.borrow_mut() = Some(handler));
     }
 
-    fn destroy_tray(&self, _tray: &TrayHandle) {
+    pub fn destroy_tray(&self, _tray: &TrayHandle) {
         let state = TRAY_STATE.with(|s| s.borrow_mut().take());
         if let Some(state) = state {
             unsafe {
@@ -419,7 +422,7 @@ impl Platform for Win32Platform {
         log::debug!("托盘已移除喵");
     }
 
-    fn set_tray_app_icon(&self, _tray: &TrayHandle) {
+    pub fn set_tray_app_icon(&self, _tray: &TrayHandle) {
         let (sw, sh) = small_icon_size();
         let hicon = app_icon_hicon(sw, sh);
         if hicon.is_null() {
@@ -451,7 +454,7 @@ impl Platform for Win32Platform {
         }
     }
 
-    fn try_acquire_single_instance(&self) -> bool {
+    pub fn try_acquire_single_instance(&self) -> bool {
         use windows_sys::Win32::System::Threading::CreateMutexW;
         use windows_sys::Win32::Foundation::ERROR_ALREADY_EXISTS;
 
@@ -478,7 +481,7 @@ impl Platform for Win32Platform {
         }
     }
 
-    fn notify_existing_instance(&self) {
+    pub fn notify_existing_instance(&self) {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             FindWindowW, PostMessageW,
         };
@@ -495,7 +498,7 @@ impl Platform for Win32Platform {
         }
     }
 
-    fn set_tray_tip(&self, _tray: &TrayHandle, tip: &str) {
+    pub fn set_tray_tip(&self, _tray: &TrayHandle, tip: &str) {
         let mut tip_wide: Vec<u16> = tip.encode_utf16().collect();
         tip_wide.truncate(127);
         tip_wide.push(0);
@@ -515,7 +518,7 @@ impl Platform for Win32Platform {
         });
     }
 
-    fn set_tray_menu(&self, _tray: &TrayHandle, items: Vec<TrayMenuItem>) {
+    pub fn set_tray_menu(&self, _tray: &TrayHandle, items: Vec<TrayMenuItem>) {
         TRAY_STATE.with(|s| {
             if let Some(state) = s.borrow_mut().as_mut() {
                 state.menu = items;
@@ -523,7 +526,7 @@ impl Platform for Win32Platform {
         });
     }
 
-    fn run(&self) {
+    pub fn run(&self) {
         use windows_sys::Win32::Media::{timeBeginPeriod, timeEndPeriod};
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             DispatchMessageW, GetMessageW, TranslateMessage, MSG,
@@ -545,22 +548,22 @@ impl Platform for Win32Platform {
         log::debug!("消息循环退出喵");
     }
 
-    fn quit(&self) {
+    pub fn quit(&self) {
         unsafe {
             windows_sys::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
         }
     }
 
-    fn scale_factor(&self) -> f32 {
+    pub fn scale_factor(&self) -> f32 {
         unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForSystem() as f32 / 96.0 }
     }
 
-    fn screen_size(&self) -> (i32, i32) {
+    pub fn screen_size(&self) -> (i32, i32) {
         use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
         unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
     }
 
-    fn display_refresh_rate(&self) -> u32 {
+    pub fn display_refresh_rate(&self) -> u32 {
         use windows_sys::Win32::Graphics::Gdi::{EnumDisplaySettingsW, DEVMODEW, ENUM_CURRENT_SETTINGS};
         let mut dm: DEVMODEW = unsafe { zeroed() };
         let ok = unsafe {
@@ -574,7 +577,7 @@ impl Platform for Win32Platform {
         }
     }
 
-    fn platform_name(&self) -> &'static str {
+    pub fn platform_name(&self) -> &'static str {
         "windows"
     }
 }
@@ -1334,7 +1337,7 @@ unsafe extern "system" {
 }
 
 /// WGL 渲染上下文句柄喵(隐藏窗口 + 设备上下文 + GL 上下文)喵
-struct WinGpuContext {
+pub struct WinGpuContext {
     /// 隐藏窗口句柄喵
     hwnd: usize,
     /// 窗口设备上下文喵
@@ -1343,8 +1346,8 @@ struct WinGpuContext {
     hglrc: *mut std::ffi::c_void,
 }
 
-impl GpuContext for WinGpuContext {
-    fn get_proc(&self, name: &str) -> *const std::ffi::c_void {
+impl WinGpuContext {
+    pub fn get_proc(&self, name: &str) -> *const std::ffi::c_void {
         let Ok(cname) = std::ffi::CString::new(name) else {
             return null_mut();
         };
@@ -1355,7 +1358,7 @@ impl GpuContext for WinGpuContext {
             }
             // 核心 1.x 函数不在扩展导出里,走 opengl32.dll 导出喵
             let module = windows_sys::Win32::System::LibraryLoader::GetModuleHandleA(
-                b"opengl32.dll\0".as_ptr(),
+                c"opengl32.dll".as_ptr().cast(),
             );
             if module.is_null() {
                 null_mut()
@@ -1370,11 +1373,11 @@ impl GpuContext for WinGpuContext {
         }
     }
 
-    fn make_current(&self) -> bool {
-        unsafe { wglMakeCurrent(self.hdc as *mut std::ffi::c_void, self.hglrc) != 0 }
+    pub fn make_current(&self) -> bool {
+        unsafe { wglMakeCurrent(self.hdc, self.hglrc) != 0 }
     }
 
-    fn valid(&self) -> bool {
+    pub fn valid(&self) -> bool {
         !self.hglrc.is_null()
     }
 }
@@ -1391,12 +1394,12 @@ impl Drop for WinGpuContext {
 }
 
 /// 创建 WGL GPU 上下文喵(隐藏窗口 + 像素格式 + GL 上下文并 make current)喵
-fn create_gpu_context_impl() -> Option<Box<dyn GpuContext>> {
+fn create_gpu_context_impl() -> Option<WinGpuContext> {
     use windows_sys::Win32::Graphics::Gdi::{GetDC, ReleaseDC};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WS_POPUP};
 
-    CLASS_ONCE.call_once(|| register_class());
+    CLASS_ONCE.call_once(register_class);
 
     unsafe {
         // 隐藏 1×1 窗口承载 GL 上下文喵(不出现在任务栏/屏幕)喵
@@ -1453,11 +1456,11 @@ fn create_gpu_context_impl() -> Option<Box<dyn GpuContext>> {
         }
 
         log::debug!("GPU: WGL 上下文已创建喵");
-        Some(Box::new(WinGpuContext {
+        Some(WinGpuContext {
             hwnd: hwnd as usize,
             hdc,
             hglrc,
-        }))
+        })
     }
 }
 
@@ -1561,12 +1564,12 @@ fn small_icon_size() -> (i32, i32) {
 }
 
 /// 从 exe 资源加载应用图标喵(winres 嵌入的 app-icon.ico,资源 id = 1)喵
+#[allow(clippy::manual_dangling_ptr)] // MAKEINTRESOURCE(1),不是空悬指针喵
 fn app_icon_hicon(width: i32, height: i32) -> HICON {
     use windows_sys::Win32::UI::WindowsAndMessaging::{LoadImageW, IMAGE_ICON, LR_DEFAULTCOLOR};
 
     unsafe {
         let hmod = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(null_mut());
-        // 资源名按整数 id 传递(等价 MAKEINTRESOURCE(1))喵
         LoadImageW(hmod, 1usize as *const u16, IMAGE_ICON, width, height, LR_DEFAULTCOLOR) as HICON
     }
 }

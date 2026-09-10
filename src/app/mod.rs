@@ -11,12 +11,11 @@ pub mod config;
 
 use crate::apps::{AppInfo, AppRegistry, icon::IconManager};
 use crate::app::config::{AppConfig, SearchMode};
-use crate::platform::Platform;
+use crate::platform::Win32Platform;
 use crate::search::{
-    Action, ItemIcon, MAX_RESULTS, Scored, SearchEngine, SearchItem,
-    builtin_providers, query_mode, to_pinyin_initials,
+    Action, ItemIcon, MAX_RESULTS, ParsedQuery, Scored, SearchEngine, SearchItem,
+    extra_results, to_pinyin_initials, ProviderContext,
 };
-use crate::search::ProviderContext;
 
 /// 空查询时每类推荐最多条数喵
 const QUICK_LIMIT: usize = 8;
@@ -69,7 +68,7 @@ pub struct AppState {
     /// 图标管理器喵
     pub icons: IconManager,
     /// 平台能力句柄喵
-    pub platform: Arc<dyn Platform>,
+    pub platform: Arc<Win32Platform>,
 
     // ---------- 搜索交互状态喵 ----------
     /// 当前查询喵
@@ -88,7 +87,7 @@ pub struct AppState {
 
 impl AppState {
     /// 初始化应用状态喵,并确保数据目录存在喵~
-    pub fn new(platform: Arc<dyn Platform>, data_dir: PathBuf) -> Self {
+    pub fn new(platform: Arc<Win32Platform>, data_dir: PathBuf) -> Self {
         // 确保数据目录存在喵
         if let Err(e) = std::fs::create_dir_all(&data_dir) {
             log::error!("创建数据目录失败: {e}");
@@ -124,7 +123,6 @@ impl AppState {
 
     /// 保存全部持久化数据喵(配置 + 注册表)喵
     pub fn persist(&mut self) {
-        self.config.sync_island_size();
         self.config.save(&self.data_dir);
         self.registry.save(&self.data_dir);
     }
@@ -198,11 +196,11 @@ impl AppState {
     fn aggregated_results(&self, query: &str) -> Vec<ListItem> {
         let mut scored: Vec<Scored> = Vec::new();
 
-        if query_mode(query) == crate::search::SearchMode::Name {
-            let ctx = ProviderContext { query, config: &self.config };
-            for provider in builtin_providers() {
-                scored.extend(provider.query(&ctx));
-            }
+        if ParsedQuery::parse(query).mode == crate::search::SearchMode::Name {
+            scored.extend(extra_results(&ProviderContext {
+                query,
+                config: &self.config,
+            }));
         }
 
         for (app, score) in self.search.search_scored(&self.registry, &self.config, query) {
@@ -374,7 +372,7 @@ fn push_section(items: &mut Vec<ListItem>, title: &str, apps: Vec<&AppInfo>) {
         return;
     }
     items.push(ListItem::Section(title.into()));
-    items.extend(apps.into_iter().cloned().map(|a| ListItem::Item(SearchItem::from_app(&a))));
+    items.extend(apps.into_iter().map(|a| ListItem::Item(SearchItem::from_app(a))));
 }
 
 fn push_initial_groups(items: &mut Vec<ListItem>, apps: &[&AppInfo]) {

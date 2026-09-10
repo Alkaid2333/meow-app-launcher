@@ -206,7 +206,6 @@ pub enum RowId {
     Margin,
     Squash,
     IconSize,
-    AlwaysOnTop,
     HotkeyEnabled,
     /// 重新录制全局热键喵
     HotkeyRecord,

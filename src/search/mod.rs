@@ -12,7 +12,7 @@ pub mod item;
 pub mod provider;
 
 pub use item::{Action, BuiltinIcon, ItemIcon, Scored, SearchItem};
-pub use provider::{builtin_providers, ProviderContext, SearchProvider};
+pub use provider::{extra_results, ProviderContext};
 
 use crate::apps::AppInfo;
 use pinyin::ToPinyin;
@@ -30,11 +30,6 @@ pub enum SearchMode {
     Tag,
     /// 按首字母搜索喵
     Initial,
-}
-
-/// 判定查询属于哪种模式喵(多源聚合只在名称模式下注入计算器/Web/命令)喵
-pub fn query_mode(input: &str) -> SearchMode {
-    ParsedQuery::parse(input).mode
 }
 
 /// 解析后的查询喵

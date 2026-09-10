@@ -8,7 +8,7 @@
 use crate::animation::{DurationBounce, IslandTransition};
 use crate::app::config::{AppConfig, AppLayout, SearchMode};
 use crate::app::{Command, SharedState};
-use crate::platform::{Platform, PlatformWindow, WindowEvent, WindowHandler};
+use crate::platform::{PlatformWindow, Win32Platform, WindowEvent, WindowHandler};
 use crate::render::edit::{caret_from_x, TextEdit};
 use crate::render::font::FontCache;
 use crate::render::settings::{
@@ -37,7 +37,7 @@ pub struct SettingsWindow {
     /// 共享应用状态喵
     state: SharedState,
     /// 平台句柄喵
-    platform: Arc<dyn Platform>,
+    platform: Arc<Win32Platform>,
     /// 窗口句柄喵
     window: PlatformWindow,
     /// 应用命令队列喵(重新扫描等)喵
@@ -103,7 +103,7 @@ impl SettingsWindow {
     ///
     /// 返回配置窗口句柄,供启动器打开设置时使用喵。
     pub fn spawn(
-        platform: Arc<dyn Platform>,
+        platform: Arc<Win32Platform>,
         state: SharedState,
         commands: Rc<RefCell<VecDeque<Command>>>,
     ) -> PlatformWindow {
@@ -126,7 +126,7 @@ impl SettingsWindow {
         });
 
         let backend = state.borrow().config.render_backend;
-        let renderer = Renderer::new(win_w, win_h, backend, &*platform).unwrap_or_else(|| {
+        let renderer = Renderer::new(win_w, win_h, backend, &platform).unwrap_or_else(|| {
             log::error!("配置窗口渲染器初始化失败,即将退出喵~");
             std::process::exit(1);
         });
@@ -254,7 +254,7 @@ impl SettingsWindow {
     fn recreate_renderer(&mut self) {
         let backend = self.state.borrow().config.render_backend;
         let (w, h) = (self.renderer.width(), self.renderer.height());
-        if let Some(renderer) = Renderer::new(w, h, backend, &*self.platform) {
+        if let Some(renderer) = Renderer::new(w, h, backend, &self.platform) {
             log::info!("配置窗口渲染器已重建 → {} 喵", renderer.mode().label());
             self.renderer = renderer;
         }
@@ -293,7 +293,7 @@ impl SettingsWindow {
                 RowHit::StepperEdit(id) => self.click_stepper_box(rect, id, lx),
                 RowHit::FilterInput(i) => self.click_filter_box(rect, i, lx),
                 RowHit::CommandAlias(i) => self.click_command_box(rect, i, lx),
-                RowHit::Input(id) if id == RowId::WebBrowser => self.click_browser_box(rect, lx),
+                RowHit::Input(RowId::WebBrowser) => self.click_browser_box(rect, lx),
                 RowHit::Input(_) => self.click_tag_box(rect, lx),
                 _ => self.apply_hit(hit),
             }
@@ -720,7 +720,6 @@ impl SettingsWindow {
     fn toggle_switch(&mut self, id: RowId) {
         let mut state = self.state.borrow_mut();
         match id {
-            RowId::AlwaysOnTop => state.config.window.always_on_top = !state.config.window.always_on_top,
             RowId::HotkeyEnabled => state.config.hotkey.enabled = !state.config.hotkey.enabled,
             RowId::ShowRecent => state.config.window.show_recent = !state.config.window.show_recent,
             RowId::ShowFavorites => {
@@ -788,16 +787,8 @@ impl SettingsWindow {
             RowId::IslandH => set_f64(&mut island.height, v),
             RowId::IslandX => set_f64(&mut island.x, v),
             RowId::IslandY => set_f64(&mut island.y, v),
-            RowId::ExpandedW => {
-                let ok = set_f64(&mut island.expanded_width, v);
-                state.config.window.width = island.expanded_width;
-                ok
-            }
-            RowId::ExpandedH => {
-                let ok = set_f64(&mut island.expanded_height, v);
-                state.config.window.height = island.expanded_height;
-                ok
-            }
+            RowId::ExpandedW => set_f64(&mut island.expanded_width, v),
+            RowId::ExpandedH => set_f64(&mut island.expanded_height, v),
             RowId::ExpandedR => set_f64(&mut island.expanded_radius, v),
             RowId::InputRatio => set_ratio(&mut island.input_ratio, v),
             RowId::Margin => set_f64(&mut island.margin, v),
@@ -1367,7 +1358,6 @@ fn dirty_rows(cfg: &AppConfig) -> Vec<RowId> {
         RowId::Margin,
         RowId::Squash,
         RowId::IconSize,
-        RowId::AlwaysOnTop,
         RowId::HotkeyEnabled,
         RowId::AutoStart,
         RowId::RenderBackend,
@@ -1405,7 +1395,6 @@ fn row_is_dirty(id: RowId, cfg: &AppConfig, d: &AppConfig) -> bool {
         RowId::Margin => neq(cfg.island.margin, d.island.margin),
         RowId::Squash => neq(cfg.island.summon_squash, d.island.summon_squash),
         RowId::IconSize => (cfg.window.icon_size - d.window.icon_size).abs() > f32::EPSILON,
-        RowId::AlwaysOnTop => cfg.window.always_on_top != d.window.always_on_top,
         RowId::HotkeyEnabled => cfg.hotkey.enabled != d.hotkey.enabled,
         RowId::AutoStart => cfg.auto_start != d.auto_start,
         RowId::RenderBackend => cfg.render_backend != d.render_backend,
@@ -1440,20 +1429,13 @@ fn restore_default(id: RowId, cfg: &mut AppConfig) -> bool {
         RowId::IslandH => cfg.island.height = d.island.height,
         RowId::IslandX => cfg.island.x = d.island.x,
         RowId::IslandY => cfg.island.y = d.island.y,
-        RowId::ExpandedW => {
-            cfg.island.expanded_width = d.island.expanded_width;
-            cfg.window.width = d.window.width;
-        }
-        RowId::ExpandedH => {
-            cfg.island.expanded_height = d.island.expanded_height;
-            cfg.window.height = d.window.height;
-        }
+        RowId::ExpandedW => cfg.island.expanded_width = d.island.expanded_width,
+        RowId::ExpandedH => cfg.island.expanded_height = d.island.expanded_height,
         RowId::ExpandedR => cfg.island.expanded_radius = d.island.expanded_radius,
         RowId::InputRatio => cfg.island.input_ratio = d.island.input_ratio,
         RowId::Margin => cfg.island.margin = d.island.margin,
         RowId::Squash => cfg.island.summon_squash = d.island.summon_squash,
         RowId::IconSize => cfg.window.icon_size = d.window.icon_size,
-        RowId::AlwaysOnTop => cfg.window.always_on_top = d.window.always_on_top,
         RowId::HotkeyEnabled => cfg.hotkey.enabled = d.hotkey.enabled,
         RowId::AutoStart => cfg.auto_start = d.auto_start,
         RowId::RenderBackend => cfg.render_backend = d.render_backend,
@@ -1651,7 +1633,6 @@ fn build_pages(
                         sw(RowId::ShowFavorites, "显示收藏", config.window.show_favorites),
                         sw(RowId::ShowFrequent, "显示最常用", config.window.show_frequent),
                         sw(RowId::ShowAll, "始终显示全部", config.window.show_all),
-                        sw(RowId::AlwaysOnTop, "始终置顶", config.window.always_on_top),
                         st(
                             RowId::IconSize,
                             "图标大小",

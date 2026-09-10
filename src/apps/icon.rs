@@ -10,7 +10,7 @@
 //! 编解码统一走 Skia 内置 codec(ICO/PNG/BMP/JPEG 均支持),不引入额外图片库喵。
 
 use super::AppInfo;
-use crate::platform::Platform;
+use crate::platform::Win32Platform;
 use skia_safe::{AlphaType, ColorType, Data, EncodedImageFormat, Image, ImageInfo, images};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,13 +22,13 @@ pub const ICON_DIR_NAME: &str = "icons";
 /// 图标管理器喵(主线程持有,维护内存缓存)喵
 pub struct IconManager {
     data_dir: PathBuf,
-    platform: Arc<dyn Platform>,
+    platform: Arc<Win32Platform>,
     /// 内存缓存: 应用名 → 解码后的 Skia Image(避免反复读盘/解码喵)
     cache: HashMap<String, Option<Image>>,
 }
 
 impl IconManager {
-    pub fn new(data_dir: PathBuf, platform: Arc<dyn Platform>) -> Self {
+    pub fn new(data_dir: PathBuf, platform: Arc<Win32Platform>) -> Self {
         let icons_dir = data_dir.join(ICON_DIR_NAME);
         // 确保图标目录存在喵
         if let Err(e) = std::fs::create_dir_all(&icons_dir) {
@@ -94,7 +94,7 @@ impl IconManager {
 /// 图标提取器喵(独立持有平台句柄与数据目录,可移入异步阻塞线程池)喵
 #[derive(Clone)]
 pub struct IconExtractor {
-    platform: Arc<dyn Platform>,
+    platform: Arc<Win32Platform>,
     data_dir: PathBuf,
 }
 
@@ -116,7 +116,7 @@ impl IconExtractor {
 }
 
 /// 提取文件图标为 Skia Image,并编码 PNG 快照落盘喵
-fn extract_and_snapshot(platform: &Arc<dyn Platform>, path: &str, snapshot: &Path) -> Option<Image> {
+fn extract_and_snapshot(platform: &Arc<Win32Platform>, path: &str, snapshot: &Path) -> Option<Image> {
     // 提取 BGRA 像素喵
     let pixels = platform.extract_icon_pixels(path)?;
 

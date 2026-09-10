@@ -137,12 +137,6 @@ impl Default for HotkeyConfig {
 /// 浮窗窗口配置喵
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct WindowConfig {
-    /// 展开面板宽度(px, 同步到 island.expanded_width)喵
-    pub width: f64,
-    /// 展开面板高度(px, 同步到 island.expanded_height)喵
-    pub height: f64,
-    /// 是否固定在屏幕顶部置顶喵
-    pub always_on_top: bool,
     /// 应用排列样式喵
     pub layout: AppLayout,
     /// 图标显示大小(px)喵
@@ -160,9 +154,6 @@ pub struct WindowConfig {
 impl Default for WindowConfig {
     fn default() -> Self {
         Self {
-            width: 560.0,
-            height: 268.0,
-            always_on_top: true,
             layout: AppLayout::Row,
             icon_size: 36.0,
             show_recent: false,
@@ -353,11 +344,7 @@ impl Default for AppConfig {
         let island = IslandConfig::default();
         Self {
             hotkey: HotkeyConfig::default(),
-            window: WindowConfig {
-                width: island.expanded_width,
-                height: island.expanded_height,
-                ..WindowConfig::default()
-            },
+            window: WindowConfig::default(),
             theme: ThemeConfig::default(),
             search: SearchConfig::default(),
             island,
@@ -387,13 +374,6 @@ impl AppConfig {
                 Self::default()
             }
         }
-    }
-
-    /// 把窗口宽高回写到岛配置,保证两处同源喵
-    pub fn sync_island_size(&mut self) {
-        self.island.expanded_width = self.window.width;
-        self.island.expanded_height = self.window.height;
-        self.island.slot_height = self.island.height;
     }
 
     /// 应用是否被关键词过滤规则排除喵(名称命中任一规则即排除)喵

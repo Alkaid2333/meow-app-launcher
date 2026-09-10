@@ -15,7 +15,7 @@ use crate::animation::{clamp_dt, DynamicIsland};
 use crate::app::{Command, ListItem, SharedState};
 use crate::apps::AppInfo;
 use crate::apps::icon::IconExtractor;
-use crate::platform::{Key, Platform, PlatformWindow, WindowEvent, WindowHandler};
+use crate::platform::{Key, PlatformWindow, Win32Platform, WindowEvent, WindowHandler};
 use crate::render::{layout, FontCache, Layout, Renderer, Theme, paint_scene};
 use skia_safe::{Image, Paint};
 use std::cell::RefCell;
@@ -47,7 +47,7 @@ pub struct Launcher {
     /// 共享应用状态喵
     state: SharedState,
     /// 平台句柄喵
-    platform: Arc<dyn Platform>,
+    platform: Arc<Win32Platform>,
     /// 窗口句柄喵
     window: PlatformWindow,
     /// 配置窗口句柄喵(打开设置时显示)喵
@@ -70,8 +70,6 @@ pub struct Launcher {
     scroll_offset: f32,
     /// BGRA 像素缓冲(复用)喵
     pixels: Vec<u8>,
-    /// 异步运行时喵(慢操作后台线程池)喵
-    runtime: tokio::runtime::Runtime,
     /// 后台任务结果发送端喵
     bg_tx: mpsc::Sender<BgEvent>,
     /// 后台任务结果接收端喵
@@ -136,7 +134,7 @@ impl Launcher {
     /// 返回启动器窗口句柄,供调用方(注册热键等)使用喵。
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
-        platform: Arc<dyn Platform>,
+        platform: Arc<Win32Platform>,
         state: SharedState,
         commands: Rc<RefCell<VecDeque<Command>>>,
         settings_window: PlatformWindow,
@@ -166,16 +164,11 @@ impl Launcher {
         });
 
         let backend = state.borrow().config.render_backend;
-        let renderer = Renderer::new(win_w, win_h, backend, &*platform).unwrap_or_else(|| {
+        let renderer = Renderer::new(win_w, win_h, backend, &platform).unwrap_or_else(|| {
             log::error!("渲染器初始化失败,即将退出喵~");
             std::process::exit(1);
         });
 
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("异步运行时初始化失败喵~");
         let (bg_tx, bg_rx) = mpsc::channel();
         let icon_extractor = state.borrow().icons.extractor();
 
@@ -193,7 +186,6 @@ impl Launcher {
             last_tick: None,
             scroll_offset: 0.0,
             pixels: Vec::new(),
-            runtime,
             bg_tx,
             bg_rx,
             icon_extractor,
@@ -755,7 +747,7 @@ impl Launcher {
     /// 后台扫描系统应用喵(不阻塞消息循环)喵
     fn spawn_scan(&mut self) {
         let tx = self.bg_tx.clone();
-        self.runtime.spawn_blocking(move || {
+        std::thread::spawn(move || {
             let apps = crate::apps::scanner::scan_installed_apps();
             let _ = tx.send(BgEvent::Scanned(apps));
         });
@@ -788,7 +780,7 @@ impl Launcher {
             self.pending_icons.insert(app.name.clone());
             let tx = self.bg_tx.clone();
             let extractor = extractor.clone();
-            self.runtime.spawn_blocking(move || {
+            std::thread::spawn(move || {
                 let (name, image) = extractor.extract(app);
                 let _ = tx.send(BgEvent::Icon { name, image });
             });
@@ -909,7 +901,7 @@ impl Launcher {
     fn recreate_renderer(&mut self) {
         let backend = self.state.borrow().config.render_backend;
         let (w, h) = (self.renderer.width(), self.renderer.height());
-        if let Some(renderer) = Renderer::new(w, h, backend, &*self.platform) {
+        if let Some(renderer) = Renderer::new(w, h, backend, &self.platform) {
             log::info!("启动器渲染器已重建 → {} 喵", renderer.mode().label());
             self.renderer = renderer;
             self.request_render();

@@ -12,6 +12,8 @@
 
 pub mod win32;
 
+pub use win32::{Win32Platform, WinGpuContext};
+
 use serde::{Deserialize, Serialize};
 
 /// 提取到的图标像素喵(BGRA 格式,自顶向下)喵
@@ -148,18 +150,6 @@ pub trait TrayHandler {
     fn on_event(&mut self, event: TrayEvent);
 }
 
-/// GPU 渲染上下文喵(平台层创建,持有 GL 上下文生命周期)喵
-///
-/// 渲染层只通过它加载 GL 函数并确保上下文 current,不碰原生句柄喵。
-pub trait GpuContext {
-    /// 加载 GL 函数指针喵(内部保证上下文已 current;未找到返回 null)喵
-    fn get_proc(&self, name: &str) -> *const std::ffi::c_void;
-    /// 确保 GL 上下文在当前线程 current(每次渲染前调用,代价可忽略)喵
-    fn make_current(&self) -> bool;
-    /// 当前是否有效喵
-    fn valid(&self) -> bool;
-}
-
 /// 系统命令喵(仅内置预定义集合,不接受任意输入,安全边界清晰)喵
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -186,134 +176,14 @@ impl SystemCommandKind {
     }
 }
 
-/// 平台能力接口喵
-pub trait Platform: Send + Sync {
-    /// 从文件路径提取图标像素喵,失败返回 None(渲染层兜底字符图标)喵
-    fn extract_icon_pixels(&self, path: &str) -> Option<IconPixels>;
-
-    /// 创建 GPU 渲染上下文喵(Windows 走 WGL/OpenGL),失败返回 None 喵
-    ///
-    /// 返回的对象保证已创建并 make current 一个可用 GL 上下文,
-    /// 渲染层通过它加载 GL 函数并维持上下文 current 喵。
-    fn create_gpu_context(&self) -> Option<Box<dyn GpuContext>>;
-
-    /// 启动一个应用(路径可以是 exe/lnk/url/任意可执行类型)喵,返回是否成功喵
-    fn launch(&self, path: &str) -> bool;
-
-    /// 打开链接喵: `browser` 为空走系统默认;
-    /// 非空时按浏览器路径启动(支持引号包裹与 `%1` 占位符)喵
-    fn open_url(&self, url: &str, browser: &str) -> bool;
-
-    /// 把文本放入系统剪贴板喵,返回是否成功喵
-    fn copy_to_clipboard(&self, text: &str) -> bool;
-
-    /// 执行内置系统命令喵(锁屏/睡眠/关机/重启),返回是否成功喵
-    fn execute_system_command(&self, command: SystemCommandKind) -> bool;
-
-    /// 注册全局热键喵,触发时向 `target` 窗口投递 Hotkey 事件喵
-    fn register_global_hotkey(
-        &self,
-        modifiers: &str,
-        key: &str,
-        target: PlatformWindow,
-    ) -> bool;
-
-    /// 取消全局热键喵
-    fn unregister_global_hotkey(&self);
-
-    /// 设置开机自启喵(仅 Windows 生效,写 HKCU 注册表 Run 键),返回是否成功喵
-    fn set_auto_start(&self, enabled: bool) -> bool;
-
-    /// 让 `meowal` 命令在终端可用喵(通用接口,各平台自行实现)喵
-    ///
-    /// Windows 实现为把可执行文件目录加入用户 PATH;其他平台(如 Unix)
-    /// 可建符号链接到 bin 目录。返回是否成功喵。
-    fn install_cli_command(&self) -> bool;
-
-    /// 创建异形透明置顶窗口喵(不绑定事件处理器)喵
-    fn create_window(&self, spec: &WindowSpec) -> Option<PlatformWindow>;
-
-    /// 绑定窗口事件处理器喵(窗口创建后调用一次)喵
-    ///
-    /// `handler` 的所有权转移给平台层,窗口销毁时自动回收喵。
-    fn set_window_handler(&self, window: &PlatformWindow, handler: Box<dyn WindowHandler>);
-
-    /// 销毁窗口喵
-    fn destroy_window(&self, window: &PlatformWindow);
-
-    /// 显示/隐藏窗口喵
-    fn show_window(&self, window: &PlatformWindow, show: bool);
-
-    /// 把窗口拉到前台喵
-    fn focus_window(&self, window: &PlatformWindow);
-
-    /// 允许向窗口拖入文件喵
-    fn enable_file_drop(&self, window: &PlatformWindow);
-
-    /// 调整窗口尺寸(物理像素)喵
-    fn resize_window(&self, window: &PlatformWindow, width: i32, height: i32);
-
-    /// 移动窗口到屏幕坐标(物理像素)喵
-    fn move_window(&self, window: &PlatformWindow, x: i32, y: i32);
-
-    /// 用 BGRA 像素呈现窗口内容喵(每像素透明)喵
-    fn present(&self, window: &PlatformWindow, width: i32, height: i32, bgra: &[u8]);
-
-    /// 设置定时器喵(驱动动画帧,间隔毫秒)喵
-    fn set_timer(&self, window: &PlatformWindow, interval_ms: u32);
-
-    /// 创建系统托盘图标喵(自带应用图标与提示,不绑定事件处理器)喵
-    fn create_tray(&self) -> Option<TrayHandle>;
-
-    /// 绑定托盘事件处理器喵(托盘创建后调用一次)喵
-    fn set_tray_handler(&self, tray: &TrayHandle, handler: Box<dyn TrayHandler>);
-
-    /// 移除托盘图标喵
-    fn destroy_tray(&self, tray: &TrayHandle);
-
-    /// 重新应用托盘图标喵(explorer 重启等场景由平台层自动调用,业务层一般不用)喵
-    fn set_tray_app_icon(&self, tray: &TrayHandle);
-
-    /// 尝试成为单实例喵(已有多余实例在跑时返回 false)喵
-    fn try_acquire_single_instance(&self) -> bool;
-
-    /// 通知已运行的实例唤起搜索框喵(配合单实例保护,再次启动 = 呼出喵)喵
-    fn notify_existing_instance(&self);
-
-    /// 更新托盘提示文本喵
-    fn set_tray_tip(&self, tray: &TrayHandle, tip: &str);
-
-    /// 更新托盘菜单项喵(右键托盘图标时自动弹出)喵
-    fn set_tray_menu(&self, tray: &TrayHandle, items: Vec<TrayMenuItem>);
-
-    /// 进入全局消息循环喵,阻塞直到收到退出请求喵
-    fn run(&self);
-
-    /// 请求退出消息循环喵
-    fn quit(&self);
-
-    /// 系统 DPI 缩放系数喵(1.0 = 100%)喵
-    fn scale_factor(&self) -> f32;
-
-    /// 屏幕尺寸(物理像素)喵
-    fn screen_size(&self) -> (i32, i32);
-
-    /// 显示器刷新率(Hz),用于对齐动画帧节奏喵
-    fn display_refresh_rate(&self) -> u32;
-
-    /// 平台名,用于日志喵
-    fn platform_name(&self) -> &'static str;
-}
-
 /// 获取当前平台的实现喵(按编译目标自动选择)喵
-pub fn platform() -> std::sync::Arc<dyn Platform> {
+pub fn platform() -> std::sync::Arc<Win32Platform> {
     #[cfg(target_os = "windows")]
     {
-        std::sync::Arc::new(win32::Win32Platform::new())
+        std::sync::Arc::new(Win32Platform::new())
     }
     #[cfg(not(target_os = "windows"))]
     {
-        // 非 Windows 平台暂不实现,后续补喵
         compile_error!("暂仅支持 Windows,后续再支持 Linux/macOS 喵~");
     }
 }

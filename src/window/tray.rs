@@ -6,7 +6,7 @@
 //! 托盘不直接操作窗口,而是把意图投递到应用命令队列,由启动器(应用控制器)统一执行喵。
 
 use crate::app::{Command, SharedState};
-use crate::platform::{Platform, TrayEvent, TrayHandle, TrayHandler, TrayMenuItem};
+use crate::platform::{TrayEvent, TrayHandle, TrayHandler, TrayMenuItem, Win32Platform};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -19,7 +19,7 @@ pub struct Tray {
     /// 应用命令队列喵
     commands: Rc<RefCell<VecDeque<Command>>>,
     /// 平台句柄喵
-    platform: Arc<dyn Platform>,
+    platform: Arc<Win32Platform>,
     /// 托盘句柄喵
     tray: TrayHandle,
 }
@@ -29,7 +29,7 @@ impl Tray {
     ///
     /// 返回托盘句柄,供调用方在退出时移除喵。
     pub fn spawn(
-        platform: Arc<dyn Platform>,
+        platform: Arc<Win32Platform>,
         state: SharedState,
         commands: Rc<RefCell<VecDeque<Command>>>,
     ) -> TrayHandle {
