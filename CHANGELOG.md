@@ -176,13 +176,13 @@
 > 于 2026-08-24 转向 Google Skia 官方绑定 **skia-safe**，改为「单窗口 + 内部自绘」喵。
 > 该决策确立了沿用至今的渲染架构与 `platform/` 边界纪律喵。
 
-[Unreleased]: https://github.com/LunaireNeko233/meow-app-launcher/compare/v1.6.0...HEAD
-[1.6.0]: https://github.com/LunaireNeko233/meow-app-launcher/compare/v1.5.0...v1.6.0
-[1.5.0]: https://github.com/LunaireNeko233/meow-app-launcher/compare/v1.4.0...v1.5.0
-[1.4.0]: https://github.com/LunaireNeko233/meow-app-launcher/compare/v1.3.3...v1.4.0
-[1.3.3]: https://github.com/LunaireNeko233/meow-app-launcher/compare/v1.3.2...v1.3.3
-[1.3.2]: https://github.com/LunaireNeko233/meow-app-launcher/compare/v1.3.1...v1.3.2
-[1.3.1]: https://github.com/LunaireNeko233/meow-app-launcher/compare/v1.3.0...v1.3.1
-[1.3.0]: https://github.com/LunaireNeko233/meow-app-launcher/compare/v1.0.1...v1.3.0
-[1.0.1]: https://github.com/LunaireNeko233/meow-app-launcher/compare/v0.1.0...v1.0.1
-[0.1.0]: https://github.com/LunaireNeko233/meow-app-launcher/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Alkaid2333/meow-app-launcher/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/Alkaid2333/meow-app-launcher/compare/v1.5.0...v1.6.0
+[1.5.0]: https://github.com/Alkaid2333/meow-app-launcher/compare/v1.4.0...v1.5.0
+[1.4.0]: https://github.com/Alkaid2333/meow-app-launcher/compare/v1.3.3...v1.4.0
+[1.3.3]: https://github.com/Alkaid2333/meow-app-launcher/compare/v1.3.2...v1.3.3
+[1.3.2]: https://github.com/Alkaid2333/meow-app-launcher/compare/v1.3.1...v1.3.2
+[1.3.1]: https://github.com/Alkaid2333/meow-app-launcher/compare/v1.3.0...v1.3.1
+[1.3.0]: https://github.com/Alkaid2333/meow-app-launcher/compare/v1.0.1...v1.3.0
+[1.0.1]: https://github.com/Alkaid2333/meow-app-launcher/compare/v0.1.0...v1.0.1
+[0.1.0]: https://github.com/Alkaid2333/meow-app-launcher/releases/tag/v0.1.0

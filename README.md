@@ -10,9 +10,9 @@ One hotkey away from everything: fuzzy app search (English / 中文 / pinyin), a
 calculator, web search and system commands. Fully self-drawn with **Rust + Skia** —
 no WebView, no HTML, no runtime to install.
 
-[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4?logo=windows&logoColor=white)](https://github.com/LunaireNeko233/meow-app-launcher)
-[![Rust](https://img.shields.io/badge/rust-1.97%2B%20%C2%B7%20edition%202024-dea584?logo=rust&logoColor=white)](https://github.com/LunaireNeko233/meow-app-launcher)
-[![Tests](https://img.shields.io/badge/tests-66%20passing-3fb950?logo=githubactions&logoColor=white)](https://github.com/LunaireNeko233/meow-app-launcher)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4?logo=windows&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
+[![Rust](https://img.shields.io/badge/rust-1.97%2B%20%C2%B7%20edition%202024-dea584?logo=rust&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
+[![Tests](https://img.shields.io/badge/tests-66%20passing-3fb950?logo=githubactions&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
 [![License](https://img.shields.io/badge/license-MIT-007ec6)](LICENSE)
 
 **[English](README.md) · [简体中文](README.zh.md)**
@@ -85,13 +85,13 @@ No runtime dependencies: the binary is self-contained and portable.
 
 ## Installation
 
-Prebuilt installers are published on the [Releases](https://github.com/LunaireNeko233/meow-app-launcher/releases)
+Prebuilt installers are published on the [Releases](https://github.com/Alkaid2333/meow-app-launcher/releases)
 page (built with Inno Setup — see `template/release-build-template.iss`).
 
 ### Build from source
 
 ```bash
-git clone https://github.com/LunaireNeko233/meow-app-launcher.git
+git clone https://github.com/Alkaid2333/meow-app-launcher.git
 cd meow-app-launcher
 cargo build --release
 # -> target/release/meowal.exe
