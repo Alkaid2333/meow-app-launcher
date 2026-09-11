@@ -7,10 +7,26 @@
 
 ## [Unreleased]
 
+暂无待发布变更喵。
+
+## [1.6.1] - 2026-09-11
+
 ### Changed
 
 - **砍掉过度工程** —— 净删 667 行代码与 3 个依赖喵。渲染层与配置层的若干抽象在没有第二个实现的情况下
   只增加理解成本，本轮按「先有重复、再抽抽象」的原则回收喵。
+
+### Fixed
+
+- **唤出搜索偶发「打不进字」** —— 分层置顶窗呼出后可能已抢到前台、键盘焦点却留在别的线程，
+  此时输入会被系统判为无效输入直接丢弃，并附赠一声提示音喵。`focus_window` 的就绪判定由
+  「只看前台窗口」升级为「前台 + 键盘焦点」双确认，抢到前台后立刻 `BringWindowToTop` + `SetFocus`
+  把焦点钉回本窗；`wnd_proc` 的 `WM_ACTIVATE` 在窗口被激活时补钉一次 `SetFocus` 兜底喵。
+- **Release 打包后拖拽注册失效** —— 提权运行后，低完整性级别的资源管理器投递的 `WM_DROPFILES`
+  会被 UIPI 在消息过滤器层拦截；`enable_file_drop` 补 `ChangeWindowMessageFilterEx` 放行喵。
+- **配置 GUI 应用栏点击偏移** —— `app_name_at` / `chip_label_at` 的命中索引按「全页行号」计数，
+  与绘制层只数同类行的 `pick_i` / `chip_i` 口径不一致，导致点谁不选谁；现改为只数
+  `AppPick` / `Chip` 行，与绘制层完全对齐喵。
 
 ## [1.6.0] - 2026-09-08
 
@@ -176,7 +192,8 @@
 > 于 2026-08-24 转向 Google Skia 官方绑定 **skia-safe**，改为「单窗口 + 内部自绘」喵。
 > 该决策确立了沿用至今的渲染架构与 `platform/` 边界纪律喵。
 
-[Unreleased]: https://github.com/Alkaid2333/meow-app-launcher/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/Alkaid2333/meow-app-launcher/compare/v1.6.1...HEAD
+[1.6.1]: https://github.com/Alkaid2333/meow-app-launcher/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/Alkaid2333/meow-app-launcher/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/Alkaid2333/meow-app-launcher/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/Alkaid2333/meow-app-launcher/compare/v1.3.3...v1.4.0

@@ -3,7 +3,7 @@
 ; 仅供非商业使用
 
 #define MyAppName "MeowAppLauncher"
-#define MyAppVersion "1.6.0"
+#define MyAppVersion "1.6.1"
 #define MyAppPublisher "若有人兮233"
 #define MyAppURL "https://github.com/Alkaid2333"
 #define MyAppExeName "meowal.exe"
@@ -35,7 +35,7 @@ LicenseFile=X:\__Space__\__Develop__\Rust\meow-app-launcher\LICENSE
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir=X:\__Space__\__Develop__\Rust\meow-app-launcher\output
-OutputBaseFilename=meow-app-launcher-setup-windows-x86_64-1.6.0
+OutputBaseFilename=meow-app-launcher-setup-windows-x86_64-1.6.1
 SetupIconFile=X:\__Space__\__Develop__\Rust\meow-app-launcher\assets\app_icons\app-icon.ico
 SolidCompression=yes
 WizardStyle=modern

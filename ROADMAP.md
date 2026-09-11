@@ -1,6 +1,6 @@
 # 路线图
 
-meow-app-launcher 的分阶段开发规划喵。当前版本 **v1.6.0**，处于第三阶段 a 的收尾段喵。
+meow-app-launcher 的分阶段开发规划喵。当前版本 **v1.6.1**，处于第三阶段 a 的收尾段喵。
 
 已经交付的内容见 [CHANGELOG.md](CHANGELOG.md)喵。
 

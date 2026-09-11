@@ -1,6 +1,6 @@
 [package]
 name = "meow-app-launcher"
-version = "1.6.0"
+version = "1.6.1"
 edition = "2024"
 description = "喵喵应用启动器 - 类 macOS 聚焦搜索的跨平台高性能应用启动器喵"
 license = "MIT"
