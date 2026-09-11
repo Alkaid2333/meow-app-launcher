@@ -287,8 +287,13 @@ impl Win32Platform {
 
     pub fn enable_file_drop(&self, window: &PlatformWindow) {
         use windows_sys::Win32::UI::Shell::DragAcceptFiles;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{ChangeWindowMessageFilterEx, MSGFLT_ALLOW};
         unsafe {
-            DragAcceptFiles(window.hwnd() as HWND, 1);
+            let hwnd = window.hwnd() as HWND;
+            DragAcceptFiles(hwnd, 1);
+            // UIPI 放行喵: 打包安装后若以更高完整性级别运行,低权限资源管理器
+            // 拖入的 WM_DROPFILES 会被系统消息过滤器拦截,导致拖拽注册失效喵。
+            ChangeWindowMessageFilterEx(hwnd, WM_DROPFILES, MSGFLT_ALLOW, null_mut());
         }
     }
 
