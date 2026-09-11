@@ -1005,33 +1005,35 @@ impl SettingsWindow {
         }
     }
 
+    /// 按命中索引取应用名喵(只数 AppPick 行,与绘制层 pick_i 计数一致)喵
     fn app_name_at(&self, index: usize) -> Option<String> {
         let page = self.pages.get(self.current_page)?;
         let mut idx = 0;
         for group in &page.groups {
             for row in &group.rows {
-                if idx == index
-                    && let SettingsRow::AppPick { name, .. } = row
-                {
-                    return Some(name.clone());
+                if let SettingsRow::AppPick { name, .. } = row {
+                    if idx == index {
+                        return Some(name.clone());
+                    }
+                    idx += 1;
                 }
-                idx += 1;
             }
         }
         None
     }
 
+    /// 按命中索引取标签芯片文本喵(只数 Chip 行,与绘制层 chip_i 计数一致)喵
     fn chip_label_at(&self, index: usize) -> Option<String> {
         let page = self.pages.get(self.current_page)?;
         let mut idx = 0;
         for group in &page.groups {
             for row in &group.rows {
-                if idx == index
-                    && let SettingsRow::Chip { label } = row
-                {
-                    return Some(label.clone());
+                if let SettingsRow::Chip { label } = row {
+                    if idx == index {
+                        return Some(label.clone());
+                    }
+                    idx += 1;
                 }
-                idx += 1;
             }
         }
         None
