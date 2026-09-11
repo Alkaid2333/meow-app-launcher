@@ -7,6 +7,7 @@
 #define MyAppPublisher "若有人兮233"
 #define MyAppURL "https://github.com/Alkaid2333"
 #define MyAppExeName "meowal.exe"
+#define ProjectRoot "X:\__Space__\__Develop__\Rust\meow-app-launcher\meow-app-launcher-main"
 
 [Setup]
 ; 注意：AppId 的值唯一标识此应用程序。不要在其他应用程序的安装程序中使用相同的 AppId 值。
@@ -30,13 +31,13 @@ ArchitecturesAllowed=x64compatible
 ; 和注册表的 64 位视图。
 ArchitecturesInstallIn64BitMode=x64compatible
 DisableProgramGroupPage=yes
-LicenseFile=X:\__Space__\__Develop__\Rust\meow-app-launcher\LICENSE
+LicenseFile="{#ProjectRoot}\LICENSE"
 ; 移除以下行以在管理安装模式下运行 (为所有用户安装)。
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
-OutputDir=X:\__Space__\__Develop__\Rust\meow-app-launcher\output
-OutputBaseFilename=meow-app-launcher-setup-windows-x86_64-1.6.1
-SetupIconFile=X:\__Space__\__Develop__\Rust\meow-app-launcher\assets\app_icons\app-icon.ico
+OutputDir="{#ProjectRoot}\output"
+OutputBaseFilename="{#MyAppName}-setup-windows-x86_64-{#MyAppVersion}"
+SetupIconFile="{#ProjectRoot}\assets\app_icons\app-icon.ico"
 SolidCompression=yes
 WizardStyle=modern
 
@@ -47,8 +48,8 @@ Name: "chinesesimp"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "X:\__Space__\__Develop__\Rust\meow-app-launcher\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "X:\__Space__\__Develop__\Rust\meow-app-launcher\assets\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#ProjectRoot}\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ProjectRoot}\assets\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; 注意：不要在任何共享系统文件上使用 "Flags: ignoreversion" 
 
 [Icons]
