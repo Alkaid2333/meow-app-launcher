@@ -233,23 +233,30 @@ impl Win32Platform {
     pub fn show_window(&self, window: &PlatformWindow, show: bool) {
         use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOW};
         unsafe {
-            // SW_SHOWNA: 显示但不抢焦点,避免分层窗闪一下又失焦喵
+            // SW_SHOW: 显示并允许激活;键盘焦点随后由 focus_window 统一钉住喵
             ShowWindow(window.hwnd() as HWND, if show { SW_SHOW } else { SW_HIDE });
         }
     }
 
+    /// 把窗口顶到前台并收回键盘焦点喵~
+    ///
+    /// 分层置顶窗有个阴魂不散的坑: 窗口可能已经是「前台窗口」,键盘焦点却留在
+    /// 别的线程 —— 此时按键会被系统判定为无效输入直接丢弃,还附赠一声提示音喵。
+    /// 所以这里不做「已是前台就返回」的省事早退,而是前台 + 焦点双重确认喵。
     pub fn focus_window(&self, window: &PlatformWindow) {
         use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
+            BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
         };
 
         let hwnd = window.hwnd() as HWND;
         unsafe {
-            // 已是前台就不折腾了喵
-            if GetForegroundWindow() == hwnd {
+            // 前台与键盘焦点双双到位,才算真的「就绪」喵
+            if GetForegroundWindow() == hwnd && GetFocus() == hwnd {
                 return;
             }
+
             // 前台锁自救: Windows 会拒绝后台进程抢前台(启动外部应用后必被拒)。
             // 附加到前台线程的输入队列,即可合法完成切换喵。
             let fg = GetForegroundWindow();
@@ -263,12 +270,17 @@ impl Win32Platform {
             if attached {
                 AttachThreadInput(cur_thread, fg_thread, 1);
             }
-            let ok = SetForegroundWindow(hwnd) != 0;
+            let foreground_ok = SetForegroundWindow(hwnd) != 0;
             if attached {
                 AttachThreadInput(cur_thread, fg_thread, 0);
             }
-            if !ok {
-                log::debug!("SetForegroundWindow 被前台锁拒绝(已尝试附加输入线程)喵~");
+
+            if foreground_ok {
+                // 前台到手后立刻把键盘焦点钉回本窗: 这一下才是「打得进字」的关键喵
+                BringWindowToTop(hwnd);
+                SetFocus(hwnd);
+            } else {
+                log::debug!("SetForegroundWindow 被前台锁拒绝(已尝试附加输入线程),待点击自救喵~");
             }
         }
     }
@@ -589,7 +601,7 @@ impl Win32Platform {
 /// 主窗口消息处理喵
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     use windows_sys::Win32::Graphics::Gdi::ValidateRect;
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_BACK};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, SetFocus, VK_BACK};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         DefWindowProcW, IDC_ARROW, LoadCursorW, SetCursor, WM_ACTIVATE, WM_CHAR, WM_CLOSE,
         WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY,
@@ -676,10 +688,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             }
             0
         }
-        // 失焦(前台切走)喵
+        // 激活状态变化喵
         WM_ACTIVATE => {
             let active = (wparam as u32 & 0xFFFF) != 0; // WA_INACTIVE = 0 喵
-            if !active {
+            if active {
+                // 分层置顶窗被激活时键盘焦点偶有漂移,这里补钉一次;
+                // 少这一下,输入会被系统当成无效输入丢弃并响一声提示音喵。
+                unsafe { SetFocus(hwnd) };
+            } else {
                 with_window_handler(hwnd, |h| h.on_event(WindowEvent::LostFocus));
             }
             0
@@ -1723,6 +1739,8 @@ fn hotkey_message_loop(
     while unsafe { GetMessageW(&mut msg, null_mut(), 0, 0) } > 0 {
         if msg.message == WM_HOTKEY && msg.wParam as i32 == HOTKEY_ID {
             log::debug!("收到全局热键喵!");
+            // 热键按下即系统认定的「最后一次输入事件」,此刻本线程握有前台特权,
+            // 抢前台就得趁现在 —— 错过这个窗口期,主线程只能走前台锁自救喵。
             unsafe { SetForegroundWindow(target_hwnd as HWND) };
             unsafe { PostMessageW(target_hwnd as HWND, WM_MEOW_HOTKEY, 0, 0) };
         }
