@@ -306,8 +306,9 @@ Issues and pull requests are welcome. Two things worth knowing before you start:
 ## Acknowledgements
 
 - The **dark theme** palette (window / sidebar / group / control colors) is adapted from
-  **winisland**, the author's other Skia-based dynamic island experiment (D3D backend) — thanks
+  **WinIsland**, the other Skia-based dynamic island experiment (D3D backend) — thanks
   to that project for the color system.
+  [WinIsland](https://github.com/WinIslandProject/WinIsland "WinIsland Repo here")
 
 ## License
 

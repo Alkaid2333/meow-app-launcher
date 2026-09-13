@@ -304,8 +304,8 @@ cargo test
 
 ## 💐 致谢
 
-- **深色主题**的配色体系（窗口 / 侧边栏 / 分组卡片 / 控件各色）借鉴自 **winisland** ——
-  作者另一個基于 D3D 后端 Skia 的灵动岛实验项目，感谢它贡献的配色喵。
+- **深色主题**的配色体系（窗口 / 侧边栏 / 分组卡片 / 控件色色）借鉴自 **WinIsland** —— 一个基于 Rust + skia + D3D 的灵动岛实验项目喵
+  [WinIsland](https://github.com/WinIslandProject/WinIsland "WinIsland 项目仓库喵")
 
 ## 📄 License
 
