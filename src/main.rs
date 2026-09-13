@@ -16,16 +16,26 @@ use meow_app_launcher::app::{AppState, SharedState};
 use meow_app_launcher::cli;
 use meow_app_launcher::platform;
 use meow_app_launcher::utils;
-use meow_app_launcher::window::{Launcher, SettingsWindow, Tray};
+use meow_app_launcher::window::{AppManagerWindow, Launcher, SettingsWindow, Tray};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(|s| s.as_str()) == Some("register") {
-        cli::cli_register(&args[1..]);
-        return;
+    // CLI 子命令喵(register 走离线注册,其余经 IPC 与运行中的实例联动)喵
+    if let Some(first) = args.first() {
+        match first.as_str() {
+            "register" => {
+                cli::cli_register(&args[1..]);
+                return;
+            }
+            "show" | "hide" | "toggle" | "query" => {
+                cli::cli_ipc(&args);
+                return;
+            }
+            _ => {}
+        }
     }
 
     // 数据目录喵(便携式,固定在 exe 同目录的 .datas,与 CLI register 保持一致)喵
@@ -60,8 +70,9 @@ fn main() {
         log::info!("启动时同步开机自启: 成功={ok} 喵");
     }
 
-    // 1. 创建配置窗口(初始隐藏)喵
+    // 1. 创建配置窗口与应用管理中心(初始隐藏)喵
     let settings_window = SettingsWindow::spawn(platform.clone(), state.clone(), commands.clone());
+    let manager_window = AppManagerWindow::spawn(platform.clone(), state.clone());
 
     // 2. 创建启动器窗口(兼任应用控制器)喵
     let launcher_window =
@@ -81,13 +92,17 @@ fn main() {
         log::info!("全局热键已禁用喵~");
     }
 
-    // 5. 运行全局消息循环喵
+    // 5. 启动 named-pipe IPC 服务端(`meowal show|hide|toggle|query` 的联动入口)喵
+    platform.start_ipc_server(launcher_window);
+
+    // 6. 运行全局消息循环喵
     platform.run();
 
-    // 6. 清理资源喵
+    // 7. 清理资源喵
     log::info!("应用退出,清理资源喵~");
     platform.unregister_global_hotkey();
     platform.destroy_tray(&tray);
     platform.destroy_window(&launcher_window);
     platform.destroy_window(&settings_window);
+    platform.destroy_window(&manager_window);
 }

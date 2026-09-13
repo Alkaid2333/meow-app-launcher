@@ -24,6 +24,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::HICON;
 const HOTKEY_ID: i32 = 0x4D4F; // "MO" 喵
 /// 热键线程 → 主窗口的自定义消息(WM_APP + 1)喵
 const WM_MEOW_HOTKEY: u32 = 0x8000 + 1;
+/// IPC 服务端 → 主窗口的自定义消息(WM_APP + 2)喵
+const WM_MEOW_IPC: u32 = 0x8000 + 2;
+/// IPC 命令队列喵(named-pipe 服务端线程投递,主线程在 wnd_proc 里取走)喵
+static IPC_QUEUE: Mutex<std::collections::VecDeque<super::IpcCommand>> =
+    Mutex::new(std::collections::VecDeque::new());
 /// 动画定时器 id 喵
 const TIMER_ID: usize = 1;
 /// 托盘回调消息(WM_USER + 1)喵
@@ -112,6 +117,32 @@ impl Win32Platform {
 
     pub fn launch(&self, path: &str) -> bool {
         launch_impl(path)
+    }
+
+    /// 带参数启动喵(explorer /select 打开所在位置等场景)喵
+    pub fn launch_args(&self, path: &str, args: &str) -> bool {
+        launch_args_impl(path, args)
+    }
+
+    /// 启动 named-pipe IPC 服务端喵(CLI 联动入口,命令投递到目标窗口)喵
+    ///
+    /// 服务端运行在独立线程,失败不阻断主流程(只是 CLI 联动不可用)喵。
+    pub fn start_ipc_server(&self, target: PlatformWindow) {
+        let hwnd = target.hwnd();
+        let spawned = std::thread::Builder::new()
+            .name("meow-ipc-server".into())
+            .spawn(move || ipc_server_loop(hwnd as HWND));
+        match spawned {
+            Ok(_) => log::info!("IPC 服务端已就绪喵~"),
+            Err(e) => log::warn!("IPC 服务端线程创建失败({e}),CLI 联动不可用喵~"),
+        }
+    }
+
+    /// 连接运行中的实例并发送一条 IPC 命令喵(CLI 客户端用)喵
+    ///
+    /// 返回服务端回执;实例未运行或管道不可达时返回 Err 喵。
+    pub fn send_ipc_command(&self, line: &str) -> Result<String, String> {
+        send_ipc_command_impl(line)
     }
 
     pub fn open_url(&self, url: &str, browser: &str) -> bool {
@@ -503,12 +534,17 @@ impl Win32Platform {
             FindWindowW, PostMessageW,
         };
 
-        // 找到主窗口,投递热键同款消息 → 已运行实例直接呼出搜索框喵
+        // 优先走 IPC 通道(与 CLI 联动同一套协议,支持传参)喵
+        if self.send_ipc_command("show").is_ok() {
+            log::info!("已通过 IPC 通知现有实例唤起搜索框喵~");
+            return;
+        }
+        // 回退: 找到主窗口,投递热键同款消息 → 已运行实例直接呼出搜索框喵
         unsafe {
             let hwnd = FindWindowW(CLASS_NAME.as_ptr(), std::ptr::null());
             if !hwnd.is_null() {
                 PostMessageW(hwnd, WM_MEOW_HOTKEY, 0, 0);
-                log::info!("已通知现有实例唤起搜索框喵~");
+                log::info!("已通知现有实例唤起搜索框(PostMessage 回退)喵~");
             } else {
                 log::warn!("未找到现有实例的主窗口喵~");
             }
@@ -541,6 +577,19 @@ impl Win32Platform {
                 state.menu = items;
             }
         });
+    }
+
+    /// 在指定窗口上弹出上下文菜单喵(同步阻塞,返回选中项下标;取消为 None)
+    ///
+    /// `screen` 为菜单弹出点的**屏幕坐标**;岛体应用卡片右键菜单走这里喵。
+    pub fn show_context_menu(
+        &self,
+        window: &PlatformWindow,
+        items: &[TrayMenuItem],
+        screen_x: i32,
+        screen_y: i32,
+    ) -> Option<usize> {
+        show_popup_menu(window.hwnd() as HWND, items, screen_x, screen_y)
     }
 
     pub fn run(&self) {
@@ -610,13 +659,20 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         DefWindowProcW, IDC_ARROW, LoadCursorW, SetCursor, WM_ACTIVATE, WM_CHAR, WM_CLOSE,
         WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY,
-        WM_PAINT, WM_SETCURSOR, WM_SYSKEYDOWN, WM_TIMER,
+        WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_SYSKEYDOWN, WM_TIMER,
     };
 
     match msg {
         // 热键触发(热键线程 PostMessage 过来)喵
         WM_MEOW_HOTKEY => {
             with_window_handler(hwnd, |h| h.on_event(WindowEvent::Hotkey));
+            0
+        }
+        // IPC 命令到达(named-pipe 服务端线程投递,逐条派发给启动器)喵
+        WM_MEOW_IPC => {
+            while let Some(cmd) = drain_ipc_queue() {
+                with_window_handler(hwnd, |h| h.on_event(WindowEvent::IpcCommand(cmd)));
+            }
             0
         }
         // 按键按下(含 Alt 组合的 WM_SYSKEYDOWN): 导航键 + 热键组合录制喵
@@ -670,6 +726,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         WM_LBUTTONUP => {
             unsafe { ReleaseCapture() };
             with_window_handler(hwnd, |h| h.on_event(WindowEvent::MouseUp));
+            0
+        }
+        // 右键松开: 请求上下文菜单(坐标随事件下发,由业务层决定弹什么)喵
+        WM_RBUTTONUP => {
+            let (x, y) = unpack_lparam(lparam);
+            with_window_handler(hwnd, |h| h.on_event(WindowEvent::ContextMenu(x, y)));
             0
         }
         // 光标由应用显式指定,避免系统误切换到「忙/加载」指针喵
@@ -745,6 +807,157 @@ fn with_window_handler<R>(hwnd: HWND, f: impl FnOnce(&mut dyn WindowHandler) -> 
         let mut handlers = handlers.try_borrow_mut().ok()?;
         handlers.get_mut(&(hwnd as usize)).map(|h| f(h.as_mut()))
     })
+}
+
+/// 从 IPC 队列取走一条命令喵(主线程 wnd_proc 里逐条取)喵
+fn drain_ipc_queue() -> Option<super::IpcCommand> {
+    IPC_QUEUE.lock().ok()?.pop_front()
+}
+
+/// named-pipe IPC 服务端主循环喵
+///
+/// 每轮: 建管道 → 等连接 → 读一行命令 → 入队 + 通知主线程 → 回执 → 断开喵。
+/// 命令执行发生在主线程(窗口操作只能在那里做),本线程只负责收发喵。
+fn ipc_server_loop(hwnd: HWND) {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_PIPE_CONNECTED, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FlushFileBuffers, ReadFile, WriteFile, PIPE_ACCESS_DUPLEX,
+    };
+    use windows_sys::Win32::System::Pipes::{
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
+        PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
+
+    let name: Vec<u16> = super::IPC_PIPE_NAME.encode_utf16().chain(Some(0)).collect();
+    loop {
+        let handle = unsafe {
+            CreateNamedPipeW(
+                name.as_ptr(),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                PIPE_UNLIMITED_INSTANCES,
+                4096,
+                4096,
+                0,
+                null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            let rc = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+            log::warn!("IPC 管道创建失败(rc={rc}),3 秒后重试喵~");
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            continue;
+        }
+
+        // 等客户端连接喵(客户端可能在 ConnectNamedPipe 前就 CreateFile,补判已连接)喵
+        let connected =
+            unsafe { ConnectNamedPipe(handle, null_mut()) != 0 } || unsafe { windows_sys::Win32::Foundation::GetLastError() } == ERROR_PIPE_CONNECTED;
+        if !connected {
+            log::debug!("IPC 客户端连接中止喵");
+            unsafe { CloseHandle(handle) };
+            continue;
+        }
+
+        // 读一行命令(以 \n 结尾;客户端写完即等响应)喵
+        let mut acc: Vec<u8> = Vec::new();
+        unsafe {
+            let mut chunk = [0u8; 1024];
+            while acc.len() < 4096 {
+                let mut read = 0u32;
+                if ReadFile(handle, chunk.as_mut_ptr(), chunk.len() as u32, &mut read, null_mut()) == 0
+                    || read == 0
+                {
+                    break;
+                }
+                acc.extend_from_slice(&chunk[..read as usize]);
+                if acc.contains(&b'\n') {
+                    break;
+                }
+            }
+        }
+        let line = String::from_utf8_lossy(&acc);
+        let line = line.lines().next().unwrap_or("");
+
+        // 入队 + 通知主线程喵
+        let reply = match super::parse_ipc_command(line) {
+            Some(cmd) => {
+                if let Ok(mut q) = IPC_QUEUE.lock() {
+                    q.push_back(cmd);
+                }
+                unsafe { PostMessageW(hwnd, WM_MEOW_IPC, 0, 0) };
+                "ok 已投递喵"
+            }
+            None => super::IPC_USAGE_HINT,
+        };
+
+        // 回执 + 断开,准备下一个客户端喵
+        unsafe {
+            let mut written = 0u32;
+            WriteFile(handle, reply.as_ptr(), reply.len() as u32, &mut written, null_mut());
+            FlushFileBuffers(handle);
+            DisconnectNamedPipe(handle);
+            CloseHandle(handle);
+        }
+        log::debug!("IPC 命令已处理: {line:?} → {reply} 喵");
+    }
+}
+
+/// IPC 客户端喵: 连接管道发送一行命令,等服务端回执后返回喵
+fn send_ipc_command_impl(line: &str) -> Result<String, String> {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING,
+    };
+
+    let name: Vec<u16> = super::IPC_PIPE_NAME.encode_utf16().chain(Some(0)).collect();
+    let handle = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            null_mut(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err("实例未运行,管道不可达喵".into());
+    }
+
+    let bytes = format!("{line}\n");
+    let mut acc: Vec<u8> = Vec::new();
+    let sent;
+    unsafe {
+        let mut written = 0u32;
+        sent = WriteFile(handle, bytes.as_ptr(), bytes.len() as u32, &mut written, null_mut()) != 0;
+        // 服务端回执完即断开,读到 EOF 为止喵
+        let mut chunk = [0u8; 512];
+        loop {
+            let mut read = 0u32;
+            if ReadFile(handle, chunk.as_mut_ptr(), chunk.len() as u32, &mut read, null_mut()) == 0
+                || read == 0
+            {
+                break;
+            }
+            acc.extend_from_slice(&chunk[..read as usize]);
+            if acc.contains(&b'\n') {
+                break;
+            }
+        }
+        CloseHandle(handle);
+    }
+    if !sent {
+        return Err("发送命令失败喵".into());
+    }
+    let reply = String::from_utf8_lossy(&acc).trim().to_string();
+    if reply.is_empty() {
+        return Err("服务端无回执喵".into());
+    }
+    Ok(reply)
 }
 
 /// 托盘隐藏窗口消息处理喵
@@ -828,11 +1041,7 @@ fn with_tray_handler<R>(f: impl FnOnce(&mut dyn TrayHandler) -> R) -> Option<R> 
 
 /// 弹出托盘菜单喵(用当前存储的菜单项)喵
 fn show_tray_menu_impl(hwnd: HWND) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, SetForegroundWindow,
-        TrackPopupMenu, MF_ENABLED, MF_GRAYED, MF_STRING, TPM_BOTTOMALIGN, TPM_RIGHTALIGN,
-        TPM_RIGHTBUTTON, WM_NULL,
-    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
     let items = TRAY_STATE.with(|s| {
         s.borrow().as_ref().map(|state| state.menu.clone()).unwrap_or_default()
@@ -841,36 +1050,56 @@ fn show_tray_menu_impl(hwnd: HWND) {
         return;
     }
 
+    // 在光标处弹出喵
+    let mut pt: POINT = unsafe { zeroed() };
+    unsafe { GetCursorPos(&mut pt) };
+    if let Some(index) = show_popup_menu(hwnd, &items, pt.x, pt.y) {
+        with_tray_handler(|h| h.on_event(TrayEvent::Menu(index)));
+    }
+}
+
+/// 弹出系统上下文菜单喵(同步阻塞,返回选中项下标;取消/点外部为 None)喵
+///
+/// `x`/`y` 为**屏幕坐标**;弹菜单前把宿主窗口设为前台,点击外部才能正常关闭喵。
+/// 托盘菜单与岛体应用卡片的右键菜单共用喵。
+fn show_popup_menu(hwnd: HWND, items: &[TrayMenuItem], x: i32, y: i32) -> Option<usize> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        AppendMenuW, CreatePopupMenu, DestroyMenu, PostMessageW, SetForegroundWindow,
+        TrackPopupMenu, MF_ENABLED, MF_GRAYED, MF_STRING, TPM_LEFTALIGN, TPM_RETURNCMD,
+        TPM_RIGHTBUTTON, WM_NULL,
+    };
+
+    if items.is_empty() {
+        return None;
+    }
     unsafe {
         let hmenu = CreatePopupMenu();
         if hmenu.is_null() {
-            return;
+            return None;
         }
 
-        // 逐个追加菜单项喵(菜单项 id = 索引 + 1,0 保留)喵
+        // 逐个追加菜单项喵(菜单项 id = 索引 + 1,0 保留给「取消」)喵
         for (i, item) in items.iter().enumerate() {
             let label: Vec<u16> = item.label.encode_utf16().chain(Some(0)).collect();
             let flags = MF_STRING | if item.enabled { MF_ENABLED } else { MF_GRAYED };
             AppendMenuW(hmenu, flags, i + 1, label.as_ptr());
         }
 
-        // 在光标处弹出菜单喵
-        let mut pt: POINT = zeroed();
-        GetCursorPos(&mut pt);
-        // 设置前台窗口,确保菜单点击外部能正确关闭喵
+        // TPM_RETURNCMD: 选中项同步返回,不用再经 WM_COMMAND 绕一圈喵
         SetForegroundWindow(hwnd);
-        TrackPopupMenu(
+        let chosen = TrackPopupMenu(
             hmenu,
-            TPM_RIGHTBUTTON | TPM_RIGHTALIGN | TPM_BOTTOMALIGN,
-            pt.x,
-            pt.y,
+            TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_RETURNCMD,
+            x,
+            y,
             0,
             hwnd,
             null_mut(),
         );
-        // 托盘菜单点完后必须再丢一条空消息,否则下次点不开喵
-        windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(hwnd, WM_NULL, 0, 0);
+        // 菜单点完后必须再丢一条空消息,否则宿主窗口下次弹不出菜单喵
+        PostMessageW(hwnd, WM_NULL, 0, 0);
         DestroyMenu(hmenu);
+        (chosen > 0).then(|| chosen as usize - 1)
     }
 }
 
@@ -2100,6 +2329,33 @@ fn launch_impl(path: &str) -> bool {
         false
     } else {
         log::info!("已启动应用: {path} 喵");
+        true
+    }
+}
+
+/// 带参数启动喵(explorer /select 打开所在位置等场景)喵
+fn launch_args_impl(path: &str, args: &str) -> bool {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let path_wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+    let args_wide: Vec<u16> = args.encode_utf16().chain(Some(0)).collect();
+    let result = unsafe {
+        ShellExecuteW(
+            null_mut(),
+            null_mut(),
+            path_wide.as_ptr(),
+            args_wide.as_ptr(),
+            null_mut(),
+            SW_SHOWNORMAL,
+        )
+    };
+    let code = result as isize;
+    if code <= 32 {
+        log::error!("带参启动失败: {path} {args} (code={code})");
+        false
+    } else {
+        log::info!("已带参启动: {path} {args} 喵");
         true
     }
 }

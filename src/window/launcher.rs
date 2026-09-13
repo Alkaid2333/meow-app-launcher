@@ -86,6 +86,8 @@ pub struct Launcher {
     drag: Option<DragState>,
     /// 滚动条拖动状态喵
     drag_scroll: Option<ScrollDrag>,
+    /// 上下文菜单是否打开中喵(菜单模态会触发失焦,期间不得隐藏岛)喵
+    menu_open: bool,
     /// 刚拖完,吞掉下一次 click 喵
     just_dragged: bool,
     /// 当前生效的定时器间隔(ms,仅变化时重设,避免每帧重置导致抖动)喵
@@ -194,6 +196,7 @@ impl Launcher {
             ime_preedit: String::new(),
             drag: None,
             drag_scroll: None,
+            menu_open: false,
             just_dragged: false,
             timer_interval_ms: HEARTBEAT_MS,
             last_win_pos: None,
@@ -529,6 +532,87 @@ impl Launcher {
         }
     }
 
+    /// 应用卡片右键菜单喵: 启动 / 收藏 / 打开所在位置 / 复制路径 / 移除注册喵
+    ///
+    /// 仅对「应用」类条目生效(计算器/Web/命令没有这些动作)喵。
+    fn on_context_menu(&mut self, x: f32, y: f32) {
+        if !self.visible || self.menu_open {
+            return;
+        }
+        let layout = self.current_layout(self.platform.scale_factor().max(0.01));
+        let hit = layout
+            .item_rects
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.left <= x && x <= r.right && r.top <= y && y <= r.bottom)
+            .map(|(i, _)| i);
+        let Some(index) = hit else {
+            return;
+        };
+        let app = match self.state.borrow().results.get(index) {
+            Some(ListItem::Item(item)) => match &item.icon {
+                crate::search::ItemIcon::App(app) => app.clone(),
+                crate::search::ItemIcon::Builtin(_) => return,
+            },
+            _ => return,
+        };
+
+        // 菜单文案随当前状态变化(收藏/取消收藏)喵
+        let items = vec![
+            crate::platform::TrayMenuItem { label: "启动".into(), enabled: true },
+            crate::platform::TrayMenuItem {
+                label: if app.favorite { "取消收藏".into() } else { "收藏".into() },
+                enabled: true,
+            },
+            crate::platform::TrayMenuItem { label: "打开所在位置".into(), enabled: true },
+            crate::platform::TrayMenuItem { label: "复制路径".into(), enabled: true },
+            crate::platform::TrayMenuItem { label: "移除注册".into(), enabled: true },
+        ];
+
+        // 客户区坐标 → 屏幕坐标(岛窗口无边框,客户区即窗口)喵
+        let (wx, wy) = self.last_win_pos.unwrap_or((0, 0));
+        // 菜单是同步模态循环,期间会收到 LostFocus,先立防护标志避免岛被隐藏喵
+        self.menu_open = true;
+        let choice = self.platform.show_context_menu(&self.window, &items, wx + x as i32, wy + y as i32);
+        self.menu_open = false;
+        log::debug!("应用卡片右键菜单: {:?} → {choice:?} 喵", app.name);
+
+        match choice {
+            Some(0) => {
+                // 启动喵(菜单仍持有条目克隆,直接执行)喵
+                let item = match self.state.borrow().results.get(index) {
+                    Some(ListItem::Item(item)) => Some(item.clone()),
+                    _ => None,
+                };
+                if let Some(item) = item {
+                    self.state.borrow_mut().run_item(&item);
+                }
+                self.hide();
+            }
+            Some(1) => {
+                self.state.borrow_mut().toggle_favorite(&app.name);
+                self.request_render();
+            }
+            Some(2) => {
+                let arg = format!("/select,\"{}\"", app.path);
+                self.platform.launch_args("explorer.exe", &arg);
+                self.hide();
+            }
+            Some(3) => {
+                if self.platform.copy_to_clipboard(&app.path) {
+                    log::info!("已复制路径: {} 喵", app.path);
+                }
+            }
+            Some(4) => {
+                self.state.borrow_mut().remove_app(&app.name);
+                self.state.borrow_mut().refresh_results();
+                log::info!("已移除注册: {} 喵", app.name);
+                self.request_render();
+            }
+            _ => {}
+        }
+    }
+
     /// 刷新搜索结果并展开/折叠面板喵
     fn refresh_results(&mut self) {
         let count = self.state.borrow_mut().refresh_results();
@@ -694,6 +778,12 @@ impl Launcher {
         self.platform.focus_window(&self.settings_window);
     }
 
+    /// 打开应用管理中心喵(管理窗口心跳检测到标志后自行显示)喵
+    fn open_app_manager(&mut self) {
+        log::info!("请求打开应用管理中心喵~");
+        self.state.borrow_mut().manager_visible = true;
+    }
+
     /// 重启应用喵
     fn restart(&mut self) {
         log::info!("重启应用喵~");
@@ -716,6 +806,7 @@ impl Launcher {
             match cmd {
                 Command::ToggleLauncher => self.toggle(),
                 Command::OpenSettings => self.open_settings(),
+                Command::OpenAppManager => self.open_app_manager(),
                 Command::Rescan => self.spawn_scan(),
                 Command::Restart => self.restart(),
                 Command::ReapplyHotkey => {
@@ -798,6 +889,34 @@ impl Launcher {
                     self.pending_icons.remove(&name);
                     self.state.borrow_mut().icons.cache_image(name, image);
                 }
+            }
+        }
+    }
+
+    /// 外部注入查询文本喵(IPC `query` 命令)喵
+    fn set_query(&mut self, text: String) {
+        {
+            let mut state = self.state.borrow_mut();
+            state.query = text;
+        }
+        self.caret = self.state.borrow().query.len();
+        self.selection = None;
+        self.selecting = false;
+        self.ime_preedit.clear();
+        self.refresh_results();
+    }
+
+    /// 处理 IPC 命令喵(named-pipe 服务端投递,CLI 联动入口)喵
+    fn on_ipc_command(&mut self, cmd: crate::platform::IpcCommand) {
+        match cmd {
+            crate::platform::IpcCommand::Show => self.show(),
+            crate::platform::IpcCommand::Hide => self.hide(),
+            crate::platform::IpcCommand::Toggle => self.toggle(),
+            crate::platform::IpcCommand::Query(text) => {
+                log::info!("IPC 查询注入: {text:?} 喵");
+                // 先呼出(会重置搜索态),再填入查询文本喵
+                self.show();
+                self.set_query(text);
             }
         }
     }
@@ -997,8 +1116,11 @@ impl WindowHandler for Launcher {
             WindowEvent::MouseMove(x, y) => self.on_mouse_move(x, y),
             WindowEvent::MouseUp => self.on_mouse_up(),
             WindowEvent::MouseWheel(delta) => self.on_wheel(delta),
+            WindowEvent::ContextMenu(x, y) => self.on_context_menu(x, y),
+            WindowEvent::IpcCommand(cmd) => self.on_ipc_command(cmd),
             WindowEvent::LostFocus => {
-                if self.visible {
+                // 右键菜单模态期间会失焦,此时不能隐藏岛喵
+                if self.visible && !self.menu_open {
                     self.hide();
                 }
             }

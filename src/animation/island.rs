@@ -96,6 +96,9 @@ pub enum MotionMode {
 }
 
 impl MotionMode {
+    /// 全部档位喵(配置 GUI 循环选项用)喵
+    pub const ALL: [MotionMode; 4] = [Self::Spring, Self::Ease, Self::Linear, Self::Instant];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Spring => "弹簧",
@@ -129,6 +132,17 @@ pub enum EasingName {
 }
 
 impl EasingName {
+    /// 全部档位喵(配置 GUI 循环选项用)喵
+    pub const ALL: [EasingName; 7] = [
+        Self::Linear,
+        Self::EaseOutQuad,
+        Self::EaseOutQuart,
+        Self::EaseOutQuint,
+        Self::EaseOutExpo,
+        Self::EaseInOutCubic,
+        Self::EaseOutBack,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Linear => "linear",

@@ -11,7 +11,7 @@
 
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4?logo=windows&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
 [![Rust](https://img.shields.io/badge/rust-1.97%2B%20%C2%B7%20edition%202024-dea584?logo=rust&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
-[![Tests](https://img.shields.io/badge/tests-66%20passing-3fb950?logo=githubactions&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
+[![Tests](https://img.shields.io/badge/tests-79%20passing-3fb950?logo=githubactions&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
 [![License](https://img.shields.io/badge/license-MIT-007ec6)](LICENSE)
 
 **[English](README.md) · [简体中文](README.zh.md)**
@@ -109,7 +109,7 @@ SKIA_BINARIES_URL="file://X:/path/to/skia-binaries-<key>.tar.gz" cargo build --r
 ```bash
 cargo run                      # debug 构建，带控制台
 MEOWAL_VERBOSE=1 cargo run     # 顺带打开 debug 级日志
-cargo test                     # 66 个测试
+cargo test                     # 79 个测试
 ```
 
 ## 🕹️ 使用
@@ -191,7 +191,7 @@ src/
     └── logger.rs      # logforth 布局、彩色、分离落盘喵
 ```
 
-`tests/` 下有 13 个测试文件、共 66 个测试，覆盖弹簧物理、模糊匹配、搜索、布局、圆角形状、
+`tests/` 下有 16 个测试文件、共 79 个测试，覆盖弹簧物理、模糊匹配、搜索、布局、圆角形状、
 岛体状态机、SVG 渲染、文本编辑、CLI 参数解析、资源完整性与 GPU 冒烟喵。
 
 ### 设计纪律
@@ -287,7 +287,7 @@ src/
 cargo test
 ```
 
-共 66 个测试喵。核心测试套件不需要 GPU 或显示器（GPU 那条会降级成冒烟检查）喵。
+共 79 个测试喵。核心测试套件不需要 GPU 或显示器（GPU 那条会降级成冒烟检查）喵。
 
 ## 🗺️ 路线图
 
@@ -301,6 +301,11 @@ cargo test
 - `animation/` 与 `layout.rs` 是纯函数且带单测 —— 改这里请一并补测试喵。
 - `assets/icons/*.svg` 是用户可以自行替换的素材；改 SVG 渲染器时请记得它只支持一个刻意做小的子集，
   不是完整的 SVG 实现喵。
+
+## 💐 致谢
+
+- **深色主题**的配色体系（窗口 / 侧边栏 / 分组卡片 / 控件各色）借鉴自 **winisland** ——
+  作者另一個基于 D3D 后端 Skia 的灵动岛实验项目，感谢它贡献的配色喵。
 
 ## 📄 License
 

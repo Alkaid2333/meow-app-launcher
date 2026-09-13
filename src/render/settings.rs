@@ -103,15 +103,12 @@ pub enum SettingsRow {
     Label { label: String, value: String },
     /// 动作按钮喵
     Button { id: RowId, label: String },
-    /// 可点选的应用行喵
-    AppPick {
-        name: String,
-        favorite: bool,
-        tags: String,
-        selected: bool,
+    /// 循环选项喵(点击轮换档位,value 为当前档位名)喵
+    Choice {
+        id: RowId,
+        label: String,
+        value: String,
     },
-    /// 标签芯片喵
-    Chip { label: String },
     /// 单行输入(显示当前草稿)喵
     Input {
         id: RowId,
@@ -155,12 +152,6 @@ pub enum RowHit {
     StepperEdit(RowId),
     /// 按钮行喵
     Button(RowId),
-    /// 点选应用(索引)喵
-    AppPick(usize),
-    /// 收藏星标(索引)喵
-    FavStar(usize),
-    /// 标签芯片(索引)喵
-    Chip(usize),
     /// 输入行喵
     Input(RowId),
     /// 过滤关键词输入框(规则下标)喵
@@ -177,6 +168,10 @@ pub enum RowHit {
     CommandDelete(usize),
     /// 恢复该项默认值喵
     Restore(RowId),
+    /// 循环选项行(点击在档位间轮换)喵
+    Choice(RowId),
+    /// 内容区滚动条滑块(按住拖动)喵
+    ScrollThumb,
 }
 
 /// 配置行身份喵(热更新时不靠页面下标)喵
@@ -190,6 +185,10 @@ pub enum RowId {
     AppLayout,
     /// 恢复默认设置喵
     Reset,
+    /// 打开应用管理中心喵
+    OpenAppManager,
+    /// 配置面板动效开关喵
+    SettingsAnim,
     MotionMode,
     Easing,
     AutoMorph,
@@ -218,9 +217,6 @@ pub enum RowId {
     ShowFrequent,
     ShowAll,
     SearchMode,
-    Rescan,
-    RemoveApp,
-    TagInput,
     /// 添加一条过滤关键词规则喵
     FilterAdd,
     /// Web 搜索引擎切换喵
@@ -246,6 +242,8 @@ pub struct SettingsLayout {
     pub hits: Vec<(Rect, RowHit)>,
     /// 内容区总高度(逻辑 px,用于滚动)喵
     pub content_height: f32,
+    /// 内容区滚动条(轨道, 滑块),内容未溢出时为 None 喵
+    pub scrollbar: Option<(Rect, Rect)>,
 }
 
 /// 当前文本编辑焦点喵(绘制层只读;同时只有一个输入框在编辑)喵
@@ -259,14 +257,13 @@ pub struct EditFocus<'a> {
     pub command: Option<(usize, &'a TextEdit)>,
     /// 正在编辑的自定义浏览器输入喵
     pub browser: Option<&'a TextEdit>,
-    /// 正在编辑的标签行喵
-    pub tag: Option<&'a TextEdit>,
 }
 
 /// 绘制配置窗口喵,返回布局结果喵
 ///
 /// `edit` 为当前正在编辑的文本焦点(数值/过滤关键词/标签三类输入框);
-/// `recording` 为热键录制中;`dirty` 为偏离默认值的行(行首画恢复图标)喵。
+/// `recording` 为热键录制中;`dirty` 为偏离默认值的行(行首画恢复图标);
+/// `fade` 为内容区淡入透明度(1.0 = 不透明,页面切换动画用)喵。
 /// `width`/`height` 为窗口当前逻辑尺寸(支持拖拽缩放)喵。
 #[allow(clippy::too_many_arguments)]
 pub fn paint_settings(
@@ -276,6 +273,7 @@ pub fn paint_settings(
     pages: &[SettingsPage],
     current_page: usize,
     scroll: f32,
+    fade: f32,
     edit: EditFocus,
     recording: bool,
     dirty: &[RowId],
@@ -312,8 +310,8 @@ pub fn paint_settings(
     paint_sidebar(canvas, theme, fonts, pages, current_page, height, &mut hits);
 
     // 内容区(页头 + 可滚动分组)喵
-    let content_height =
-        paint_content(canvas, theme, fonts, pages, current_page, scroll, edit, recording, dirty, width, height, &mut hits);
+    let (content_height, scrollbar) =
+        paint_content(canvas, theme, fonts, pages, current_page, scroll, fade, edit, recording, dirty, width, height, &mut hits);
 
     // 右上角关闭钮喵
     paint_close_button(canvas, theme, width, &mut hits);
@@ -326,6 +324,7 @@ pub fn paint_settings(
     SettingsLayout {
         hits,
         content_height,
+        scrollbar,
     }
 }
 
@@ -504,7 +503,7 @@ fn paint_window_chrome(
     hits.push((grip, RowHit::ResizeGrip));
 }
 
-/// 绘制内容区(页头 + 分组卡片),返回内容总高度喵
+/// 绘制内容区(页头 + 分组卡片 + 滚动条),返回(内容总高度, 滚动条几何)喵
 #[allow(clippy::too_many_arguments)]
 fn paint_content(
     canvas: &Canvas,
@@ -513,18 +512,19 @@ fn paint_content(
     pages: &[SettingsPage],
     current_page: usize,
     scroll: f32,
+    fade: f32,
     edit: EditFocus,
     recording: bool,
     dirty: &[RowId],
     width: f32,
     height: f32,
     hits: &mut Vec<(Rect, RowHit)>,
-) -> f32 {
+) -> (f32, Option<(Rect, Rect)>) {
     let content_left = SIDEBAR_WIDTH;
     let content_width = width - SIDEBAR_WIDTH;
 
     let Some(page) = pages.get(current_page) else {
-        return 0.0;
+        return (0.0, None);
     };
 
     // 页头: 大标题 + 副标题 + 分隔线(固定在顶部不滚动)喵
@@ -547,15 +547,19 @@ fn paint_content(
         &hline,
     );
 
-    // 内容区裁剪(可滚动)喵
-    let content_rect = Rect::from_xywh(content_left, 0.0, content_width, height);
+    // 内容区裁剪: 上沿卡在页头下方,滚动内容不会盖过页头标题栏喵
+    let content_rect = Rect::from_xywh(content_left, HEADER_HEIGHT, content_width, height - HEADER_HEIGHT);
     canvas.save();
     canvas.clip_rect(content_rect, None, Some(false));
     canvas.translate((0.0, -scroll));
+    // 页面切换淡入层喵(fade = 1 时跳过,省一次离屏合成)喵
+    let fading = fade < 1.0;
+    if fading {
+        canvas.save_layer_alpha_f(None, fade);
+    }
 
+    let viewport = Rect::from_xywh(0.0, HEADER_HEIGHT, width, height - HEADER_HEIGHT);
     let mut y = HEADER_HEIGHT + 10.0;
-    let mut pick_i = 0usize;
-    let mut chip_i = 0usize;
 
     for group in &page.groups {
         // 计算分组高度喵
@@ -612,7 +616,7 @@ fn paint_content(
                 group_rect.width() - GROUP_PADDING * 2.0,
                 ROW_HEIGHT,
             );
-            paint_row(canvas, theme, fonts, row, row_rect, scroll, edit, recording, dirty, hits, &mut pick_i, &mut chip_i);
+            paint_row(canvas, theme, fonts, row, row_rect, scroll, viewport, edit, recording, dirty, hits);
             row_y += ROW_HEIGHT;
         }
 
@@ -621,11 +625,50 @@ fn paint_content(
 
     // 内容总高度(用于滚动)喵
     let content_height = y + CONTENT_PADDING;
+    if fading {
+        canvas.restore();
+    }
     canvas.restore();
-    content_height
+
+    // 滚动条(窗口坐标,固定在内容区右缘): 内容溢出才出现喵
+    let scrollbar = if content_height > height + 0.5 {
+        let track = Rect::from_xywh(
+            width - 12.0,
+            HEADER_HEIGHT + 2.0,
+            4.0,
+            height - HEADER_HEIGHT - 4.0,
+        );
+        let thumb_h = (track.height() * track.height() / content_height).max(28.0);
+        let travel = (track.height() - thumb_h).max(1.0);
+        let max_scroll = content_height - height;
+        let prog = (scroll / max_scroll).clamp(0.0, 1.0);
+        let thumb = Rect::from_xywh(track.left, track.top + travel * prog, track.width(), thumb_h);
+
+        let mut track_paint = Paint::default();
+        track_paint.set_color(theme.control_border);
+        track_paint.set_anti_alias(true);
+        let track_path = shape::rounded_rect_path(track, track.width() / 2.0);
+        canvas.draw_path(&track_path, &track_paint);
+
+        let mut thumb_paint = Paint::default();
+        thumb_paint.set_color(theme.disabled);
+        thumb_paint.set_anti_alias(true);
+        let thumb_path = shape::rounded_rect_path(thumb, thumb.width() / 2.0);
+        canvas.draw_path(&thumb_path, &thumb_paint);
+        hits.push((thumb, RowHit::ScrollThumb));
+
+        Some((track, thumb))
+    } else {
+        None
+    };
+
+    (content_height, scrollbar)
 }
 
 /// 绘制单行控件喵
+///
+/// `viewport` 为内容区可视范围(窗口坐标): 滚出视口的行不再登记命中区,
+/// 避免看不见的控件被误点喵。
 #[allow(clippy::too_many_arguments)]
 fn paint_row(
     canvas: &Canvas,
@@ -634,18 +677,26 @@ fn paint_row(
     row: &SettingsRow,
     rect: Rect,
     scroll: f32,
+    viewport: Rect,
     edit: EditFocus,
     recording: bool,
     dirty: &[RowId],
     hits: &mut Vec<(Rect, RowHit)>,
-    pick_i: &mut usize,
-    chip_i: &mut usize,
 ) {
+    // 命中登记统一走这里: 换算屏幕坐标 + 剔除滚出视口的部分喵
+    let mut push_hit = |r: Rect, h: RowHit| {
+        let sr = screen_hit(r, scroll);
+        if sr.bottom > viewport.top && sr.top < viewport.bottom {
+            hits.push((sr, h));
+        }
+    };
+
     // 可调行: 偏离默认值时在行首画「恢复默认」图标喵
     let rid = match row {
         SettingsRow::Switch { id, .. }
         | SettingsRow::Stepper { id, .. }
-        | SettingsRow::Button { id, .. } => Some(*id),
+        | SettingsRow::Button { id, .. }
+        | SettingsRow::Choice { id, .. } => Some(*id),
         _ => None,
     };
     let label_off = if let Some(r) = rid
@@ -653,7 +704,7 @@ fn paint_row(
     {
         let icon = Rect::from_xywh(rect.left, rect.center_y() - 9.0, 18.0, 18.0);
         draw_restore_icon(canvas, theme, icon);
-        hits.push((screen_hit(icon, scroll), RowHit::Restore(r)));
+        push_hit(icon, RowHit::Restore(r));
         22.0
     } else {
         0.0
@@ -664,7 +715,7 @@ fn paint_row(
             draw_row_label(canvas, theme, fonts, label, rect, 96.0, label_off);
             draw_chip(canvas, fonts, rect.right - 84.0, rect, "开关", theme.moss);
             draw_toggle(canvas, theme, rect, *value);
-            hits.push((screen_hit(rect, scroll), RowHit::Switch(*id)));
+            push_hit(rect, RowHit::Switch(*id));
         }
         SettingsRow::Stepper {
             id,
@@ -695,18 +746,18 @@ fn paint_row(
             // 步进减号喵
             let dec_rect = Rect::from_xywh(rect.right - 146.0, rect.center_y() - 13.0, 26.0, 26.0);
             draw_control_button(canvas, theme, fonts, dec_rect, "−");
-            hits.push((screen_hit(dec_rect, scroll), RowHit::StepperDec(*id)));
+            push_hit(dec_rect, RowHit::StepperDec(*id));
 
             // 数值框(可点击进入手动键入 / 光标定位 / 拖选)喵
             let box_rect = Rect::from_xywh(rect.right - 112.0, rect.center_y() - 14.0, 64.0, 28.0);
             let te = edit.stepper.and_then(|(eid, te)| (eid == *id).then_some(te));
             draw_value_box(canvas, theme, fonts, box_rect, *value, unit, te);
-            hits.push((screen_hit(box_rect, scroll), RowHit::StepperEdit(*id)));
+            push_hit(box_rect, RowHit::StepperEdit(*id));
 
             // 步进加号喵
             let inc_rect = Rect::from_xywh(rect.right - 34.0, rect.center_y() - 13.0, 26.0, 26.0);
             draw_control_button(canvas, theme, fonts, inc_rect, "+");
-            hits.push((screen_hit(inc_rect, scroll), RowHit::StepperInc(*id)));
+            push_hit(inc_rect, RowHit::StepperInc(*id));
 
             let _ = (min, max);
         }
@@ -724,88 +775,15 @@ fn paint_row(
             btn_rect.inset((0.0, 8.0));
             // 热键录制中: 高亮成强调色,提示「正在等待按键」喵
             let rec = *id == RowId::HotkeyRecord && recording;
-            let path = shape::rounded_rect_path(btn_rect, CTRL_RADIUS);
-            let mut bg = Paint::default();
-            bg.set_color(if rec { theme.accent } else { theme.control_bg });
-            bg.set_anti_alias(true);
-            canvas.draw_path(&path, &bg);
-            let font = fonts.font(13.0);
-            let mut p = Paint::default();
-            // 删除/重置类动作用警示色区分;录制中用白字;其余用强调色喵
-            p.set_color(if rec {
-                Color::WHITE
-            } else if *id == RowId::RemoveApp || *id == RowId::Reset {
-                theme.danger
-            } else {
-                theme.accent
-            });
-            p.set_anti_alias(true);
-            crate::render::text::draw_centered(canvas, label, btn_rect, &font, &p);
-            hits.push((screen_hit(rect, scroll), RowHit::Button(*id)));
+            draw_flat_button(canvas, theme, fonts, btn_rect, label, ButtonTone::for_id(*id, rec));
+            push_hit(rect, RowHit::Button(*id));
         }
-        SettingsRow::AppPick {
-            name,
-            favorite,
-            tags,
-            selected,
-        } => {
-            if *selected {
-                let path = shape::rounded_rect_path(rect, 6.0);
-                let mut bg = Paint::default();
-                bg.set_color(theme.accent);
-                bg.set_anti_alias(true);
-                canvas.draw_path(&path, &bg);
-                let mut overlay = Paint::default();
-                overlay.set_color(theme.group_bg);
-                overlay.set_anti_alias(true);
-                overlay.set_alpha_f(0.82);
-                canvas.draw_path(&path, &overlay);
-            }
-            let star = if *favorite { "★" } else { "☆" };
-            let star_rect = Rect::from_xywh(rect.left, rect.top, 28.0, rect.height());
-            let font = fonts.font(15.0);
-            let mut sp = Paint::default();
-            sp.set_color(if *favorite { theme.accent } else { theme.text_dim });
-            sp.set_anti_alias(true);
-            crate::render::text::draw_centered(canvas, star, star_rect, &font, &sp);
-            hits.push((screen_hit(star_rect, scroll), RowHit::FavStar(*pick_i)));
-
-            let mut np = Paint::default();
-            np.set_color(theme.text);
-            np.set_anti_alias(true);
-            crate::render::text::draw_clipped(
-                canvas,
-                name,
-                Rect::from_xywh(rect.left + 34.0, rect.top, rect.width() - 40.0, rect.height() * 0.55),
-                &fonts.font(13.0),
-                &np,
-            );
-            let mut tp = Paint::default();
-            tp.set_color(theme.text_dim);
-            tp.set_anti_alias(true);
-            crate::render::text::draw_clipped(
-                canvas,
-                tags,
-                Rect::from_xywh(rect.left + 34.0, rect.top + rect.height() * 0.5, rect.width() - 40.0, rect.height() * 0.45),
-                &fonts.font(11.0),
-                &tp,
-            );
-            hits.push((screen_hit(rect, scroll), RowHit::AppPick(*pick_i)));
-            *pick_i += 1;
-        }
-        SettingsRow::Chip { label } => {
-            let chip = Rect::from_xywh(rect.left, rect.center_y() - 12.0, 120.0f32.min(rect.width()), 24.0);
-            let path = shape::rounded_rect_path(chip, 12.0);
-            let mut bg = Paint::default();
-            bg.set_color(theme.control_bg);
-            bg.set_anti_alias(true);
-            canvas.draw_path(&path, &bg);
-            let mut p = Paint::default();
-            p.set_color(theme.text);
-            p.set_anti_alias(true);
-            crate::render::text::draw_centered(canvas, &format!("{label} ×"), chip, &fonts.font(12.0), &p);
-            hits.push((screen_hit(chip, scroll), RowHit::Chip(*chip_i)));
-            *chip_i += 1;
+        SettingsRow::Choice { id, label, value } => {
+            let mut btn_rect = rect;
+            btn_rect.inset((0.0, 8.0));
+            let text = format!("{label} · {value}");
+            draw_flat_button(canvas, theme, fonts, btn_rect, &text, ButtonTone::Accent);
+            push_hit(rect, RowHit::Choice(*id));
         }
         SettingsRow::Input { id, label, value, placeholder } => {
             draw_row_label(canvas, theme, fonts, label, rect, 240.0, 0.0);
@@ -815,12 +793,8 @@ fn paint_row(
             bg.set_color(theme.control_bg);
             bg.set_anti_alias(true);
             canvas.draw_path(&path, &bg);
-            // 浏览器行用独立编辑槽,标签行沿用 tag 槽喵
-            let (editing, draft) = if *id == RowId::WebBrowser {
-                (edit.browser.is_some(), edit.browser)
-            } else {
-                (edit.tag.is_some(), edit.tag)
-            };
+            // 浏览器行用独立编辑槽喵
+            let (editing, draft) = (edit.browser.is_some(), edit.browser);
             let mut border = Paint::default();
             border.set_color(if editing { theme.accent } else { theme.control_border });
             border.set_anti_alias(true);
@@ -851,7 +825,7 @@ fn paint_row(
                     );
                 }
             }
-            hits.push((screen_hit(box_rect, scroll), RowHit::Input(*id)));
+            push_hit(box_rect, RowHit::Input(*id));
         }
         SettingsRow::Filter {
             index,
@@ -900,12 +874,12 @@ fn paint_row(
                     &ip,
                 );
             }
-            hits.push((screen_hit(input_rect, scroll), RowHit::FilterInput(*index)));
+            push_hit(input_rect, RowHit::FilterInput(*index));
 
             // 大小写判定 checkbox(用内置 SVG) + 说明文字喵
             let check_rect = Rect::from_xywh(rect.right - 132.0, rect.center_y() - 9.0, 18.0, 18.0);
             draw_checkbox(canvas, theme, check_rect, *case_sensitive);
-            hits.push((screen_hit(check_rect, scroll), RowHit::FilterCase(*index)));
+            push_hit(check_rect, RowHit::FilterCase(*index));
             let mut cp = Paint::default();
             cp.set_color(theme.text_dim);
             cp.set_anti_alias(true);
@@ -919,19 +893,8 @@ fn paint_row(
 
             // 删除按钮(内嵌关闭 SVG)喵
             let del_rect = Rect::from_xywh(rect.right - 34.0, rect.center_y() - 13.0, 26.0, 26.0);
-            let del_path = shape::rounded_rect_path(del_rect, CTRL_RADIUS);
-            let mut dbg = Paint::default();
-            dbg.set_color(theme.control_bg);
-            dbg.set_anti_alias(true);
-            canvas.draw_path(&del_path, &dbg);
-            let mut dbr = Paint::default();
-            dbr.set_color(theme.control_border);
-            dbr.set_anti_alias(true);
-            dbr.set_style(PaintStyle::Stroke);
-            dbr.set_stroke_width(1.0);
-            canvas.draw_path(&del_path, &dbr);
-            icon::draw_builtin(canvas, del_rect, "close", theme.text);
-            hits.push((screen_hit(del_rect, scroll), RowHit::FilterDelete(*index)));
+            draw_icon_button(canvas, theme, del_rect, "close", theme.text);
+            push_hit(del_rect, RowHit::FilterDelete(*index));
         }
         SettingsRow::Command { index, kind, aliases } => {
             // 指令行: 左侧别名输入框 + 中部命令类型按钮 + 右侧删除按钮喵
@@ -976,7 +939,7 @@ fn paint_row(
                     &ip,
                 );
             }
-            hits.push((screen_hit(input_rect, scroll), RowHit::CommandAlias(*index)));
+            push_hit(input_rect, RowHit::CommandAlias(*index));
 
             // 命令类型循环按钮(点击在 锁屏/睡眠/关机/重启 间轮换)喵
             let kind_rect = Rect::from_xywh(rect.right - 136.0, rect.center_y() - 14.0, 92.0, 28.0);
@@ -995,25 +958,88 @@ fn paint_row(
             kp.set_color(theme.text);
             kp.set_anti_alias(true);
             crate::render::text::draw_centered(canvas, kind.title(), kind_rect, &fonts.font(12.0), &kp);
-            hits.push((screen_hit(kind_rect, scroll), RowHit::CommandKind(*index)));
+            push_hit(kind_rect, RowHit::CommandKind(*index));
 
             // 删除按钮(内嵌关闭 SVG)喵
             let del_rect = Rect::from_xywh(rect.right - 34.0, rect.center_y() - 13.0, 26.0, 26.0);
-            let del_path = shape::rounded_rect_path(del_rect, CTRL_RADIUS);
-            let mut dbg = Paint::default();
-            dbg.set_color(theme.control_bg);
-            dbg.set_anti_alias(true);
-            canvas.draw_path(&del_path, &dbg);
-            let mut dbr = Paint::default();
-            dbr.set_color(theme.control_border);
-            dbr.set_anti_alias(true);
-            dbr.set_style(PaintStyle::Stroke);
-            dbr.set_stroke_width(1.0);
-            canvas.draw_path(&del_path, &dbr);
-            icon::draw_builtin(canvas, del_rect, "close", theme.text);
-            hits.push((screen_hit(del_rect, scroll), RowHit::CommandDelete(*index)));
+            draw_icon_button(canvas, theme, del_rect, "close", theme.text);
+            push_hit(del_rect, RowHit::CommandDelete(*index));
         }
     }
+}
+
+/// 按钮色调喵(动作语义决定颜色)喵
+enum ButtonTone {
+    /// 强调色文字喵
+    Accent,
+    /// 警示色文字(删除/重置类)喵
+    Danger,
+    /// 强调色底 + 白字(录制中)喵
+    Recording,
+}
+
+impl ButtonTone {
+    /// 按行身份推断色调喵
+    fn for_id(id: RowId, recording: bool) -> Self {
+        if recording {
+            Self::Recording
+        } else if id == RowId::Reset {
+            Self::Danger
+        } else {
+            Self::Accent
+        }
+    }
+}
+
+/// 扁平动作按钮喵(描边底 + 语义色文字)喵
+fn draw_flat_button(
+    canvas: &Canvas,
+    theme: &SettingsTheme,
+    fonts: &FontCache,
+    rect: Rect,
+    label: &str,
+    tone: ButtonTone,
+) {
+    let path = shape::rounded_rect_path(rect, CTRL_RADIUS);
+    let mut bg = Paint::default();
+    bg.set_color(match tone {
+        ButtonTone::Recording => theme.accent,
+        _ => theme.control_bg,
+    });
+    bg.set_anti_alias(true);
+    canvas.draw_path(&path, &bg);
+
+    let font = fonts.font(13.0);
+    let mut p = Paint::default();
+    p.set_color(match tone {
+        ButtonTone::Recording => Color::WHITE,
+        ButtonTone::Danger => theme.danger,
+        ButtonTone::Accent => theme.accent,
+    });
+    p.set_anti_alias(true);
+    crate::render::text::draw_centered(canvas, label, rect, &font, &p);
+}
+
+/// 小图标按钮喵(描边底 + 内嵌 SVG)喵
+fn draw_icon_button(
+    canvas: &Canvas,
+    theme: &SettingsTheme,
+    rect: Rect,
+    icon_name: &str,
+    color: Color,
+) {
+    let path = shape::rounded_rect_path(rect, CTRL_RADIUS);
+    let mut bg = Paint::default();
+    bg.set_color(theme.control_bg);
+    bg.set_anti_alias(true);
+    canvas.draw_path(&path, &bg);
+    let mut border = Paint::default();
+    border.set_color(theme.control_border);
+    border.set_anti_alias(true);
+    border.set_style(PaintStyle::Stroke);
+    border.set_stroke_width(1.0);
+    canvas.draw_path(&path, &border);
+    icon::draw_builtin(canvas, rect, icon_name, color);
 }
 
 /// 绘制数值框喵: 静态时显示「值+单位」;编辑中显示草稿 + 光标 + 选中态喵

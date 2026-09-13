@@ -74,6 +74,10 @@ impl Tray {
                 enabled: true,
             },
             TrayMenuItem {
+                label: "应用管理".into(),
+                enabled: true,
+            },
+            TrayMenuItem {
                 label: "重启".into(),
                 enabled: true,
             },
@@ -98,8 +102,9 @@ impl TrayHandler for Tray {
                 let cmd = match i {
                     0 => Some(Command::ToggleLauncher),
                     1 => Some(Command::OpenSettings),
-                    2 => Some(Command::Restart),
-                    3 => Some(Command::Quit),
+                    2 => Some(Command::OpenAppManager),
+                    3 => Some(Command::Restart),
+                    4 => Some(Command::Quit),
                     _ => None,
                 };
                 if let Some(cmd) = cmd {

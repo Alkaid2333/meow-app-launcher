@@ -1,6 +1,6 @@
 [package]
 name = "meow-app-launcher"
-version = "1.6.1"
+version = "1.7.0"
 edition = "2024"
 description = "喵喵应用启动器 - 类 macOS 聚焦搜索的跨平台高性能应用启动器喵"
 license = "MIT"
@@ -56,6 +56,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Memory",
     "Win32_System_Shutdown",
     "Win32_System_Power",
+    # named-pipe IPC 服务端(CreateNamedPipeW/ConnectNamedPipe 等,ReadFile 需 IO)喵
+    "Win32_System_Pipes",
+    "Win32_System_IO",
 ] }
 
 [profile.dev]

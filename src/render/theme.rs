@@ -70,6 +70,18 @@ impl Theme {
                 fill: Color::from_argb(0xFF, 0xF7, 0xF4, 0xEE),
                 glass: false,
             },
+            // 深色: 暗夜玻璃,浅色文字(配色借鉴 winisland,见 README 喵)喵
+            ThemePreset::Dark => Self {
+                border: Color::from_argb(0x38, 0xFF, 0xFF, 0xFF),
+                text: Color::from_rgb(0xF5, 0xF5, 0xF7),
+                text_dim: Color::from_rgb(0xAE, 0xAE, 0xB2),
+                hover_bg: Color::from_rgb(0x3A, 0x3A, 0x3C),
+                accent: Color::from_rgb(0x0A, 0x84, 0xFF),
+                accent_text: Color::from_rgb(0xFF, 0xFF, 0xFF),
+                shadow: Color::from_argb(0x48, 0x00, 0x00, 0x00),
+                fill: Color::from_argb(0xEE, 0x1C, 0x1C, 0x1E),
+                glass: true,
+            },
         }
     }
 }
@@ -100,12 +112,18 @@ pub struct SettingsTheme {
 impl SettingsTheme {
     /// 按主题预设取配置 GUI 色板喵
     pub fn for_preset(preset: ThemePreset) -> Self {
+        // 深色整套独立色板喵
+        if preset == ThemePreset::Dark {
+            let mut t = Self::dark();
+            t.win_bg = with_alpha(t.win_bg, 0xF2);
+            return t;
+        }
         let mut t = Self::light();
         // 窗口底色随预设微调: 毛玻璃半透明、云母带暖灰、不透明实心暖纸喵
         t.win_bg = match preset {
             ThemePreset::FrostedGlass => with_alpha(t.win_bg, 0xF2),
             ThemePreset::Mica => Color::from_rgb(0xF0, 0xEC, 0xE3),
-            ThemePreset::Opaque => Color::from_rgb(0xF4, 0xF1, 0xEA),
+            _ => Color::from_rgb(0xF4, 0xF1, 0xEA),
         };
         if preset == ThemePreset::Mica {
             t.accent = Color::from_rgb(0x1F, 0x6B, 0x58);
@@ -130,6 +148,26 @@ impl SettingsTheme {
             control_border: Color::from_argb(0x40, 0x16, 0x15, 0x0F),
             shadow: Color::from_argb(0x18, 0x16, 0x15, 0x0F),
             moss: Color::from_rgb(0x1F, 0x6B, 0x58),
+        }
+    }
+
+    /// 暗夜深色基准喵(配色借鉴 winisland 的 dark_settings_theme,见 README 喵)喵
+    pub fn dark() -> Self {
+        Self {
+            win_bg: Color::from_rgb(0x1C, 0x1C, 0x1E),
+            sidebar_bg: Color::from_rgb(0x24, 0x24, 0x26),
+            group_bg: Color::from_rgb(0x2C, 0x2C, 0x2E),
+            text: Color::from_rgb(0xF5, 0xF5, 0xF7),
+            text_dim: Color::from_rgb(0xAE, 0xAE, 0xB2),
+            disabled: Color::from_rgb(0x63, 0x63, 0x66),
+            accent: Color::from_rgb(0x0A, 0x84, 0xFF),
+            danger: Color::from_rgb(0xE6, 0x37, 0x2D),
+            toggle_on: Color::from_rgb(0x30, 0xD1, 0x58),
+            toggle_off: Color::from_rgb(0x63, 0x63, 0x66),
+            control_bg: Color::from_rgb(0x3A, 0x3A, 0x3C),
+            control_border: Color::from_argb(0x28, 0xFF, 0xFF, 0xFF),
+            shadow: Color::from_argb(0x48, 0x00, 0x00, 0x00),
+            moss: Color::from_rgb(0x30, 0xD1, 0x58),
         }
     }
 }

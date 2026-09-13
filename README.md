@@ -12,7 +12,7 @@ no WebView, no HTML, no runtime to install.
 
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4?logo=windows&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
 [![Rust](https://img.shields.io/badge/rust-1.97%2B%20%C2%B7%20edition%202024-dea584?logo=rust&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
-[![Tests](https://img.shields.io/badge/tests-66%20passing-3fb950?logo=githubactions&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
+[![Tests](https://img.shields.io/badge/tests-79%20passing-3fb950?logo=githubactions&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
 [![License](https://img.shields.io/badge/license-MIT-007ec6)](LICENSE)
 
 **[English](README.md) · [简体中文](README.zh.md)**
@@ -109,7 +109,7 @@ SKIA_BINARIES_URL="file://X:/path/to/skia-binaries-<key>.tar.gz" cargo build --r
 ```bash
 cargo run                      # debug build, console attached
 MEOWAL_VERBOSE=1 cargo run     # ...with debug-level logging
-cargo test                     # 66 tests
+cargo test                     # 79 tests
 ```
 
 ## Usage
@@ -191,7 +191,7 @@ src/
     └── logger.rs      # logforth layout, colours, split log files
 ```
 
-`tests/` holds 66 tests across 13 files, covering springs, fuzzy matching, search, layout, shapes,
+`tests/` holds 79 tests across 16 files, covering springs, fuzzy matching, search, layout, shapes,
 the island state machine, the SVG renderer, text editing, the CLI parser, assets and a GPU smoke test.
 
 ### Design rules
@@ -287,7 +287,7 @@ A loguru-style coloured console layout built on `logforth`:
 cargo test
 ```
 
-66 tests, no GPU or display required for the core suites (the GPU test degrades to a smoke check).
+79 tests, no GPU or display required for the core suites (the GPU test degrades to a smoke check).
 
 ## Roadmap
 
@@ -302,6 +302,12 @@ Issues and pull requests are welcome. Two things worth knowing before you start:
 - `animation/` and `layout.rs` are pure and unit-tested — changes there should come with tests.
 - Icon assets in `assets/icons/*.svg` are user-replaceable; if you change the SVG renderer, keep the
   subset it supports in mind (it is intentionally small, not a full SVG implementation).
+
+## Acknowledgements
+
+- The **dark theme** palette (window / sidebar / group / control colors) is adapted from
+  **winisland**, the author's other Skia-based dynamic island experiment (D3D backend) — thanks
+  to that project for the color system.
 
 ## License
 

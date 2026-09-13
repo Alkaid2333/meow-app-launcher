@@ -1,6 +1,7 @@
 //! 命令行工具喵~
 //!
 //! `meowal register <名称> <路径> [-ico 图标]` 喵。
+//! `meowal show|hide|toggle|query <文本>` 喵: 经 named-pipe 与运行中的实例联动喵。
 //! 独立成模块,便于放在 `tests/` 里做单元测试喵。
 
 use crate::app::config;
@@ -66,6 +67,41 @@ fn attach_parent_console() {
             // Rust 的 stdout/stderr 每次访问都会重新 GetStdHandle,重绑后输出即可见喵
             SetStdHandle(STD_OUTPUT_HANDLE, con);
             SetStdHandle(STD_ERROR_HANDLE, con);
+        }
+    }
+}
+
+/// `meowal show|hide|toggle|query <文本>` 喵: 经 named-pipe 联动运行中的实例喵
+///
+/// 实例未运行时打印提示并以退出码 1 结束喵。
+pub fn cli_ipc(args: &[String]) {
+    #[cfg(target_os = "windows")]
+    attach_parent_console();
+
+    let command = match args.first().map(|s| s.as_str()) {
+        Some("show") => "show".to_string(),
+        Some("hide") => "hide".to_string(),
+        Some("toggle") => "toggle".to_string(),
+        Some("query") => {
+            let text = args[1..].join(" ");
+            if text.trim().is_empty() {
+                eprintln!("用法: meowal query <搜索文本>");
+                std::process::exit(1);
+            }
+            format!("query {text}")
+        }
+        _ => {
+            eprintln!("用法: meowal show | hide | toggle | query <文本> | register <名称> <路径>");
+            std::process::exit(1);
+        }
+    };
+
+    let platform = crate::platform::platform();
+    match platform.send_ipc_command(&command) {
+        Ok(reply) => println!("{reply}"),
+        Err(e) => {
+            eprintln!("meowal: {e}");
+            std::process::exit(1);
         }
     }
 }

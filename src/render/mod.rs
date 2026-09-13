@@ -10,6 +10,7 @@
 //! * `shape` 连续曲率圆角几何喵
 //! * `paint` 场景绘制喵
 
+pub mod app_manager;
 pub mod font;
 pub mod icon;
 pub mod layout;

@@ -43,6 +43,8 @@ pub enum Command {
     ToggleLauncher,
     /// 打开配置窗口喵
     OpenSettings,
+    /// 打开应用管理中心窗口喵
+    OpenAppManager,
     /// 重新扫描系统应用喵
     Rescan,
     /// 重启应用喵
@@ -83,6 +85,8 @@ pub struct AppState {
     pub launcher_visible: bool,
     /// 配置窗口是否应显示喵(供配置窗口心跳检测)喵
     pub settings_visible: bool,
+    /// 应用管理中心是否应显示喵(供管理窗口心跳检测)喵
+    pub manager_visible: bool,
 }
 
 impl AppState {
@@ -118,6 +122,7 @@ impl AppState {
             results_visible: false,
             launcher_visible: false,
             settings_visible: false,
+            manager_visible: false,
         }
     }
 
@@ -192,6 +197,7 @@ impl AppState {
     ///
     /// 分数域约定: 计算器 3.0 置顶、命令 = 模糊分 + 2.0、应用为原始模糊分、
     /// Web 固定 0.0 垫底;t:/i: 定向模式不注入多源结果喵。
+    /// **系统指令单独成组置底**——与应用彻底隔离,避免方向键/点击误触关机类指令喵。
     /// 排序后统一截断到 [`MAX_RESULTS`],保证交互预算喵。
     fn aggregated_results(&self, query: &str) -> Vec<ListItem> {
         let mut scored: Vec<Scored> = Vec::new();
@@ -207,15 +213,7 @@ impl AppState {
             scored.push(Scored::new(score, SearchItem::from_app(app)));
         }
 
-        // 分数降序,同分按标题排序保证稳定喵
-        scored.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.item.title.cmp(&b.item.title))
-        });
-        scored.truncate(MAX_RESULTS);
-        scored.into_iter().map(|s| ListItem::Item(s.item)).collect()
+        aggregate_items(scored)
     }
 
     /// 移动选中,跳过分组头喵
@@ -247,6 +245,13 @@ impl AppState {
     /// 应用条目顺带记录使用统计(次数 + 最近时间)喵。
     pub fn execute_selected(&mut self) -> Option<String> {
         let item = self.selected_item()?.clone();
+        self.run_item(&item)
+    }
+
+    /// 执行任意条目的动作喵(搜索结果与右键菜单共用)喵
+    ///
+    /// 应用条目顺带记录使用统计(次数 + 最近时间)喵。
+    pub fn run_item(&mut self, item: &SearchItem) -> Option<String> {
         match &item.action {
             Action::Launch(path) => {
                 if !self.platform.launch(path) {
@@ -284,6 +289,33 @@ impl AppState {
                 Some(item.title.clone())
             }
         }
+    }
+
+    /// 原地修改一个注册应用喵(改名/改路径/改图标等统一入口)
+    ///
+    /// 修改后重同步搜索索引并持久化,返回是否修改成功喵。
+    /// 改名时若新名与现有应用冲突则拒绝喵。
+    pub fn mutate_app(&mut self, name: &str, f: impl FnOnce(&mut AppInfo) -> bool) -> bool {
+        let old_name = name.to_string();
+        // 先在克隆体上试改: 改名校验不过就不落地,避免半途污染索引喵
+        let Some(mut draft) = self.registry.apps.iter().find(|a| a.name == old_name).cloned() else {
+            return false;
+        };
+        if !f(&mut draft) {
+            return false;
+        }
+        if draft.name != old_name && self.registry.find(&draft.name).is_some() {
+            log::warn!("应用改名冲突: {} 已存在,已拒绝喵", draft.name);
+            return false;
+        }
+        if let Some(app) = self.registry.apps.iter_mut().find(|a| a.name == old_name) {
+            *app = draft;
+        } else {
+            return false;
+        }
+        self.search.sync(&self.registry.apps);
+        self.persist();
+        true
     }
 
     /// 手动注册应用喵
@@ -334,6 +366,32 @@ impl AppState {
         self.search.sync(&self.registry.apps);
         self.persist();
     }
+}
+
+/// 把多源聚合的带分条目整理成最终列表喵(纯函数,便于单测)喵
+///
+/// 规则: 应用等条目按分数降序(同分按标题)截断到 [`MAX_RESULTS`];
+/// **系统指令单独成组置底**——与应用彻底隔离,避免误触关机类指令喵。
+pub fn aggregate_items(scored: Vec<Scored>) -> Vec<ListItem> {
+    let (mut commands, mut rest): (Vec<Scored>, Vec<Scored>) = scored
+        .into_iter()
+        .partition(|s| matches!(s.item.action, Action::SystemCommand(_)));
+    let by_rank = |a: &Scored, b: &Scored| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.item.title.cmp(&b.item.title))
+    };
+    rest.sort_by(by_rank);
+    commands.sort_by(by_rank);
+    rest.truncate(MAX_RESULTS);
+
+    let mut items: Vec<ListItem> = rest.into_iter().map(|s| ListItem::Item(s.item)).collect();
+    if !commands.is_empty() {
+        items.push(ListItem::Section("指令".into()));
+        items.extend(commands.into_iter().map(|s| ListItem::Item(s.item)));
+    }
+    items
 }
 
 /// 空查询推荐列表喵(过滤规则命中的应用先行剔除)喵

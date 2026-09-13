@@ -110,6 +110,8 @@ pub enum WindowEvent {
     MouseMove(f32, f32),
     /// 鼠标松开喵
     MouseUp,
+    /// 右键松开(客户区物理坐标,请求上下文菜单)喵
+    ContextMenu(f32, f32),
     /// 鼠标滚轮(正=向上)喵
     MouseWheel(f32),
     /// 窗口失去激活(前台切走)喵
@@ -127,6 +129,8 @@ pub enum WindowEvent {
     Close,
     /// 拖入文件(路径列表)喵
     FilesDropped(Vec<String>),
+    /// IPC 命令到达喵(named-pipe 服务端投递,由启动器执行)喵
+    IpcCommand(IpcCommand),
 }
 
 /// 窗口事件处理器(由业务层实现)喵
@@ -187,3 +191,45 @@ pub fn platform() -> std::sync::Arc<Win32Platform> {
         compile_error!("暂仅支持 Windows,后续再支持 Linux/macOS 喵~");
     }
 }
+
+// ---------------------------------------------------------------------------
+// named-pipe IPC 喵(CLI 与运行中实例的联动通道)喵
+// ---------------------------------------------------------------------------
+
+/// 命名管道路径喵(服务端 = 运行中的 GUI 实例,客户端 = meowal CLI)喵
+pub const IPC_PIPE_NAME: &str = "\\\\.\\pipe\\meow-app-launcher";
+
+/// IPC 命令喵(文本协议,一行一命令,UTF-8)喵
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IpcCommand {
+    /// 呼出搜索框喵
+    Show,
+    /// 隐藏搜索框喵
+    Hide,
+    /// 切换呼出/隐藏喵
+    Toggle,
+    /// 呼出并填入查询文本喵
+    Query(String),
+}
+
+/// 解析一行 IPC 命令文本喵(`show` / `hide` / `toggle` / `query <文本>`)喵
+///
+/// 纯函数,便于单元测试喵。
+pub fn parse_ipc_command(line: &str) -> Option<IpcCommand> {
+    let line = line.trim();
+    let (verb, rest) = match line.find(' ') {
+        Some(i) => (&line[..i], line[i + 1..].trim()),
+        None => (line, ""),
+    };
+    match verb {
+        "show" => Some(IpcCommand::Show),
+        "hide" => Some(IpcCommand::Hide),
+        "toggle" => Some(IpcCommand::Toggle),
+        "query" if !rest.is_empty() => Some(IpcCommand::Query(rest.to_string())),
+        _ => None,
+    }
+}
+
+/// IPC 服务端对未知命令的标准回执喵(CLI 帮助文案共用,保持一致)喵
+pub const IPC_USAGE_HINT: &str =
+    "err 未知命令喵 (可用: show / hide / toggle / query <文本>)";

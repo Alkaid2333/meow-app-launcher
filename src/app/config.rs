@@ -26,8 +26,8 @@ pub fn data_dir() -> std::path::PathBuf {
         .join(DATA_DIR_NAME)
 }
 
-/// 主题预设喵: 材质与配色融合成一体,三档均为浅色,
-/// 文字色与底材成对出现,任何预设下对比度都有保证喵。
+/// 主题预设喵: 材质与配色融合成一体,
+/// 三档浅色 + 一档深色,文字色与底材成对出现,任何预设下对比度都有保证喵。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemePreset {
@@ -38,15 +38,21 @@ pub enum ThemePreset {
     Mica,
     /// 不透明: 实心暖纸,描边更强,深色文字喵
     Opaque,
+    /// 深色: 暗夜玻璃,浅色文字喵(配色借鉴 winisland,见 README 喵)
+    Dark,
 }
 
 impl ThemePreset {
+    /// 全部档位喵(配置 GUI 循环选项的数据驱动化用)喵
+    pub const ALL: [ThemePreset; 4] = [Self::FrostedGlass, Self::Mica, Self::Opaque, Self::Dark];
+
     /// 给配置 GUI 看的名字喵
     pub fn label(self) -> &'static str {
         match self {
             Self::FrostedGlass => "毛玻璃",
             Self::Mica => "云母",
             Self::Opaque => "不透明",
+            Self::Dark => "深色",
         }
     }
 
@@ -55,7 +61,8 @@ impl ThemePreset {
         match self {
             Self::FrostedGlass => Self::Mica,
             Self::Mica => Self::Opaque,
-            Self::Opaque => Self::FrostedGlass,
+            Self::Opaque => Self::Dark,
+            Self::Dark => Self::FrostedGlass,
         }
     }
 }
@@ -71,6 +78,27 @@ pub enum AppLayout {
     Row,
 }
 
+impl AppLayout {
+    /// 全部档位喵(配置 GUI 循环选项用)喵
+    pub const ALL: [AppLayout; 2] = [Self::Grid, Self::Row];
+
+    /// 给配置 GUI 看的名字喵
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Grid => "网格",
+            Self::Row => "列表",
+        }
+    }
+
+    /// 循环切换喵
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Grid => Self::Row,
+            Self::Row => Self::Grid,
+        }
+    }
+}
+
 /// 默认搜索模式喵
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -82,6 +110,20 @@ pub enum SearchMode {
     Tag,
     /// 按首字母搜索喵(`i: a b c` 前缀)
     Initial,
+}
+
+impl SearchMode {
+    /// 全部档位喵(配置 GUI 循环选项用)喵
+    pub const ALL: [SearchMode; 3] = [Self::Name, Self::Tag, Self::Initial];
+
+    /// 给配置 GUI 看的名字喵
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Name => "名称",
+            Self::Tag => "标签 t:",
+            Self::Initial => "首字母 i:",
+        }
+    }
 }
 
 /// 渲染后端喵(可切换,GPU 初始化失败时自动回退 CPU)喵
@@ -96,6 +138,9 @@ pub enum RenderBackend {
 }
 
 impl RenderBackend {
+    /// 全部档位喵(配置 GUI 循环选项用)喵
+    pub const ALL: [RenderBackend; 2] = [Self::Cpu, Self::Gpu];
+
     /// 给配置 GUI 看的名字喵
     pub fn label(self) -> &'static str {
         match self {
@@ -224,6 +269,15 @@ pub enum WebEngine {
 }
 
 impl WebEngine {
+    /// 全部档位喵(配置 GUI 循环选项用)喵
+    pub const ALL: [WebEngine; 5] = [
+        Self::Baidu,
+        Self::Bing,
+        Self::Sogou,
+        Self::Google,
+        Self::Duckduckgo,
+    ];
+
     /// 给配置 GUI 看的名字喵
     pub fn label(self) -> &'static str {
         match self {
@@ -337,6 +391,14 @@ pub struct AppConfig {
     /// 渲染后端喵(CPU/GPU 可切换,GPU 失败自动回退 CPU)喵
     #[serde(default)]
     pub render_backend: RenderBackend,
+    /// 配置面板动效喵(滚动平滑 + 页面过渡;默认开启)喵
+    #[serde(default = "default_true")]
+    pub settings_anim: bool,
+}
+
+/// serde 默认值辅助: 恒真喵
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppConfig {
@@ -350,6 +412,7 @@ impl Default for AppConfig {
             island,
             auto_start: false,
             render_backend: RenderBackend::default(),
+            settings_anim: true,
         }
     }
 }
