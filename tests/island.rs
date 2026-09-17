@@ -2,6 +2,7 @@
 
 use meow_app_launcher::animation::island::{
     DynamicIsland, EasingName, IslandConfig, IslandState, IslandTransition, MotionMode,
+    REVEAL_ROW_SPAN, REVEAL_STAGGER, cascade,
 };
 
 fn settle(island: &mut DynamicIsland) {
@@ -237,4 +238,69 @@ fn 可用转换随状态变化() {
     assert_eq!(i.available().len(), 2); // island: expand / dismiss
     i.transition(IslandTransition::Expand);
     assert_eq!(i.available().len(), 2); // expanded: collapse / dismissExpanded
+}
+
+#[test]
+fn 呼出与展开都会重放内容级联() {
+    let mut i = DynamicIsland::new(IslandConfig::default());
+    i.set_stage(900.0, 500.0);
+    i.transition(IslandTransition::Summon);
+    assert!(i.frame().reveal < 0.001, "呼出应把级联进度拨回起点");
+    settle(&mut i);
+    assert!((i.frame().reveal - 1.0).abs() < 1e-6, "唤出后内容应已就位");
+
+    i.transition(IslandTransition::Expand);
+    assert!(i.frame().reveal < 0.001, "展开应把级联进度拨回起点");
+    settle(&mut i);
+    assert!((i.frame().reveal - 1.0).abs() < 1e-6, "级联应收尾到 1");
+}
+
+#[test]
+fn 收场时级联直接定型() {
+    let mut i = DynamicIsland::new(IslandConfig::default());
+    i.set_stage(900.0, 500.0);
+    i.transition(IslandTransition::Summon);
+    i.step(1.0 / 240.0);
+    assert!(i.frame().reveal < 1.0, "级联应该正在跑");
+
+    /* 半路收起:内容必须立刻定型,不然会和淡出一层层叠影喵 */
+    i.transition(IslandTransition::Dismiss);
+    assert_eq!(i.frame().reveal, 1.0);
+}
+
+#[test]
+fn 降低动效时级联直接落位() {
+    let mut i = DynamicIsland::new(IslandConfig::default());
+    i.set_stage(900.0, 500.0);
+    i.config.reduce_motion = true;
+    i.transition(IslandTransition::Summon);
+    assert_eq!(i.frame().reveal, 1.0, "降低动效应直接落位");
+}
+
+#[test]
+fn 瞬时档位不播放级联() {
+    let mut i = DynamicIsland::new(IslandConfig::default());
+    i.set_stage(900.0, 500.0);
+    i.config.motion_mode = MotionMode::Instant;
+    i.sync(false);
+    i.transition(IslandTransition::SummonExpanded);
+    assert!((i.frame().reveal - 1.0).abs() < 1e-6, "瞬时档位应直接落位");
+}
+
+#[test]
+fn 级联按行错峰自上而下() {
+    let p: Vec<f64> = (0..6)
+        .map(|i| cascade(0.5, i, 6, REVEAL_STAGGER, REVEAL_ROW_SPAN))
+        .collect();
+    for w in p.windows(2) {
+        assert!(w[0] >= w[1], "错峰顺序反了: {p:?}");
+    }
+    assert!(p[0] > 0.0, "首行该露头了: {p:?}");
+    assert!(p[5] < 1.0, "末行还不该到位: {p:?}");
+
+    /* 两端必须是干净的 0 / 1,渲染层才好彻底跳过或彻底落笔 */
+    assert_eq!(cascade(0.0, 0, 6, REVEAL_STAGGER, REVEAL_ROW_SPAN), 0.0);
+    assert_eq!(cascade(1.0, 5, 6, REVEAL_STAGGER, REVEAL_ROW_SPAN), 1.0);
+    /* 只有一行时没有错峰可言,整行一起浮现 */
+    assert_eq!(cascade(1.0, 0, 1, REVEAL_STAGGER, REVEAL_ROW_SPAN), 1.0);
 }

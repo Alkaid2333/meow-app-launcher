@@ -24,6 +24,28 @@ fn smoothstep(e0: f64, e1: f64, x: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// 内容级联入场的总时长(秒)喵
+pub const REVEAL_DURATION: f64 = 0.34;
+/// 相邻两行的入场延迟(占时间轴的比例): 越小越「同时涌出」喵
+pub const REVEAL_STAGGER: f64 = 0.055;
+/// 单行自己从透明到不透明所占的比例喵
+pub const REVEAL_ROW_SPAN: f64 = 0.45;
+/// 级联入场的缓动: 快起慢收,和弹簧的收尾能接上喵
+pub const REVEAL_EASING: &str = "easeOutQuad";
+
+/// 级联入场: 第 `index` 行(共 `count` 行)在总进度 `reveal` 处的可见进度(0..1)喵
+///
+/// 把 0→1 的总进度摊在「首行起跑 → 末行收尾」的时间轴上,
+/// 于是整列按 `step` 错峰浮现,像一串涟漪自上而下铺开喵。
+/// 越界一律钳制,渲染层拿到的永远是合法值喵。
+pub fn cascade(reveal: f64, index: usize, count: usize, step: f64, span: f64) -> f64 {
+    let span = span.max(1e-3);
+    let last = count.saturating_sub(1) as f64;
+    let timeline = (step * last + span).max(span);
+    let local = (clamp(reveal, 0.0, 1.0) * timeline - step * index as f64) / span;
+    super::springs::easing_fn(REVEAL_EASING)(clamp(local, 0.0, 1.0))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
     pub x: f64,
@@ -357,6 +379,8 @@ pub struct IslandFrame {
     pub panel_opacity: f64,
     /// 面板的入场位移（px，向下为正）
     pub panel_shift: f64,
+    /// 内容级联入场进度：0 = 刚冒出、1 = 全部就位
+    pub reveal: f64,
     /// 垂直方向被安全线挡住（触底反弹中）
     pub hit_bottom: bool,
     /// 水平方向被安全线挡住
@@ -403,6 +427,8 @@ pub struct DynamicIsland {
     pub config: IslandConfig,
     pub state: IslandState,
     springs: IslandSprings,
+    /// 内容级联入场通道喵(纯视觉,不参与几何)喵
+    reveal: Animator,
     stage_w: f64,
     stage_h: f64,
 }
@@ -419,6 +445,7 @@ impl DynamicIsland {
             config,
             state: IslandState::Hidden,
             springs: IslandSprings::new([0.0; 6], false),
+            reveal: Animator::new_tween(1.0, REVEAL_DURATION, REVEAL_EASING),
             stage_w: 0.0,
             stage_h: 0.0,
         };
@@ -465,7 +492,28 @@ impl DynamicIsland {
             a.set(v[i]);
         }
         self.state = t.to_state();
+        // 登场与展开时把内容重新「铺」一遍;收场时内容直接定型,免得淡出叠影喵
+        match t {
+            IslandTransition::Summon
+            | IslandTransition::SummonExpanded
+            | IslandTransition::Expand => self.reveal_restart(),
+            IslandTransition::Dismiss
+            | IslandTransition::DismissExpanded
+            | IslandTransition::Collapse => self.reveal.jump(1.0),
+        }
         true
+    }
+
+    /// 重新播放一次内容级联入场喵(呼出 / 结果刷新时调用)喵
+    ///
+    /// 降低动效或瞬时档位下直接落位: 无障碍优先,不做过场喵。
+    pub fn reveal_restart(&mut self) {
+        if self.config.reduce_motion || matches!(self.config.motion_mode, MotionMode::Instant) {
+            self.reveal.jump(1.0);
+            return;
+        }
+        self.reveal.jump(0.0);
+        self.reveal.set(1.0);
     }
 
     /// 按可见性 + 是否展开,挑一段合法过渡喵
@@ -532,6 +580,7 @@ impl DynamicIsland {
         for a in self.anims() {
             a.step(dt);
         }
+        self.reveal.step(dt);
         self.frame()
     }
 
@@ -542,6 +591,7 @@ impl DynamicIsland {
             && self.springs.ty.settled()
             && self.springs.opacity.settled()
             && self.springs.morph.settled()
+            && self.reveal.settled()
     }
 
     /// 参数改完之后调一下，把动画器目标对齐到当前状态。
@@ -624,6 +674,7 @@ impl DynamicIsland {
             },
             panel_opacity: smoothstep(0.42, 0.98, s.morph.value()),
             panel_shift: lerp(12.0, 0.0, m),
+            reveal: clamp(self.reveal.value(), 0.0, 1.0),
             hit_bottom,
             hit_x,
         }

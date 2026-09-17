@@ -11,7 +11,7 @@
 
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4?logo=windows&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
 [![Rust](https://img.shields.io/badge/rust-1.97%2B%20%C2%B7%20edition%202024-dea584?logo=rust&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
-[![Tests](https://img.shields.io/badge/tests-79%20passing-3fb950?logo=githubactions&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
+[![Tests](https://img.shields.io/badge/tests-111%20passing-3fb950?logo=githubactions&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
 [![License](https://img.shields.io/badge/license-MIT-007ec6)](LICENSE)
 
 **[English](README.md) · [简体中文](README.zh.md)**
@@ -29,6 +29,8 @@
 ### 搜索
 
 - **全局热键** —— 默认 `Ctrl+Alt+Space`，可自由重绑，改完即时生效喵。
+- **按住修饰键提权启动** —— 按住配置好的修饰键（默认 Shift）再确认结果，就以管理员身份运行它喵。
+  提权被抽象成**平台能力**：Windows 走 UAC，Linux 后端对应 `sudo`，业务层只问「此刻按着修饰键吗」喵。
 - **模糊匹配** —— 中文、英文、拼音（全拼与首字母）三种都支持，带子序列打分喵。
 - **三种模式** —— 名称搜索、`t:` 标签搜索、`i:` 首字母搜索喵。
 - **中文输入法** —— 组字预览、提交、取消都正确处理喵。
@@ -48,6 +50,10 @@
 - **一体灵动岛** —— 搜索框与结果面板是同一块超椭圆，展开时整体形变喵。
 - **弹簧物理动画** —— 六条独立过渡（呼出 / 隐藏 / 展开 / 收起 + 两组扩展态），每条都能单独调时长、回弹与质量；
   动画永远可打断，每帧按当前状态重新求解喵。
+- **结果级联入场** —— 呼出与展开时结果逐行错峰浮现，每行晚几十毫秒并带一点向上浮起；
+  收起时改为直接定型，淡出不会拖出叠影喵。
+- **滚动平滑趋近** —— 滚轮与键盘导航只挪动目标位置，真正的推进交给帧率无关的指数平滑
+  （恒定步长下可精确结合），并按阈值吸附，尾巴不会无限爬行喵。
 - **三档材质预设** —— 毛玻璃、云母、不透明；文字色与底材**成对解析**，任何预设下对比度都有保证喵。
 - **行 / 网格两种排布**，键盘导航全几何化，鼠标悬停自动吸附喵。
 - **分层窗上的锐利中文** —— 字号取整 + 关闭次像素定位 + 轻微 hinting 三件套喵。
@@ -55,6 +61,10 @@
 ### 桌面集成
 
 - **系统托盘** —— 图标直接取自应用自身的 `.ico` 资源；资源管理器重启后自动重建喵。
+- **子进程永远拿到最新环境** —— 岛是常驻进程，子进程本会继承它启动那一刻的环境块快照，
+  于是你改完系统变量后从它打开 Terminal 仍是旧的 `PATH`。现在会重读系统键与用户键、
+  按 Windows 的规矩合并（用户 `PATH` 接在系统 `PATH` 之后、会话级的 `TEMP`/`TMP` 不越界）、
+  展开 `%引用%`，再在 `WM_SETTINGCHANGE` 与每次启动前差量写回自己的环境块喵。
 - **配置 GUI** —— 侧边栏 + 分组卡片，主题、几何、热键、过滤、Web 搜索与指令别名都能可视化编辑喵。
 - **单实例保护** —— 再次启动只会唤起已有实例，不会出现双岛互踩喵。
 - **开机自启**、**开始菜单扫描**（含图标提取与 PNG 快照缓存）、**命令行 / 拖拽注册**、
@@ -109,7 +119,7 @@ SKIA_BINARIES_URL="file://X:/path/to/skia-binaries-<key>.tar.gz" cargo build --r
 ```bash
 cargo run                      # debug 构建，带控制台
 MEOWAL_VERBOSE=1 cargo run     # 顺带打开 debug 级日志
-cargo test                     # 79 个测试
+cargo test                     # 111 个测试
 ```
 
 ## 🕹️ 使用
@@ -171,6 +181,7 @@ src/
 │   └── svg.rs         # 轻量内嵌 SVG 渲染器喵
 ├── platform/
 │   ├── mod.rs         # Platform trait —— 唯一的平台边界喵
+│   ├── env.rs         # 环境变量合并 / 展开 / 差量(纯逻辑)喵
 │   └── win32.rs       # Win32 实现喵
 ├── animation/
 │   ├── mod.rs         # 启动器弹簧喵
@@ -191,8 +202,8 @@ src/
     └── logger.rs      # logforth 布局、彩色、分离落盘喵
 ```
 
-`tests/` 下有 16 个测试文件、共 79 个测试，覆盖弹簧物理、模糊匹配、搜索、布局、圆角形状、
-岛体状态机、SVG 渲染、文本编辑、CLI 参数解析、资源完整性与 GPU 冒烟喵。
+`tests/` 下有 17 个测试文件、共 111 个测试，覆盖弹簧物理、模糊匹配、搜索、布局、圆角形状、
+岛体状态机、SVG 渲染、文本编辑、CLI 参数解析、环境变量两级合并与展开、资源完整性与 GPU 冒烟喵。
 
 ### 设计纪律
 
@@ -217,6 +228,7 @@ src/
 | `hotkey.enabled` | `true` | 是否启用全局热键喵 |
 | `hotkey.modifiers` | `"ctrl+alt"` | `ctrl` / `alt` / `shift` / `win`，可用 `+` 组合喵 |
 | `hotkey.key` | `"space"` | 触发键喵 |
+| `elevate_modifier` | `"shift"` | 按住它以管理员身份启动：`disabled` / `shift` / `ctrl` / `alt` / `win` 喵 |
 | `window.layout` | `"row"` | `row` 行 / `grid` 网格喵 |
 | `window.icon_size` | `36.0` | 图标尺寸(px)喵 |
 | `window.show_recent` | `false` | 显示最近使用喵 |
@@ -287,7 +299,7 @@ src/
 cargo test
 ```
 
-共 79 个测试喵。核心测试套件不需要 GPU 或显示器（GPU 那条会降级成冒烟检查）喵。
+共 111 个测试喵。核心测试套件不需要 GPU 或显示器（GPU 那条会降级成冒烟检查）喵。
 
 ## 🗺️ 路线图
 

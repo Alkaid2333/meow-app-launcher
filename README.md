@@ -12,7 +12,7 @@ no WebView, no HTML, no runtime to install.
 
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4?logo=windows&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
 [![Rust](https://img.shields.io/badge/rust-1.97%2B%20%C2%B7%20edition%202024-dea584?logo=rust&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
-[![Tests](https://img.shields.io/badge/tests-79%20passing-3fb950?logo=githubactions&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
+[![Tests](https://img.shields.io/badge/tests-111%20passing-3fb950?logo=githubactions&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
 [![License](https://img.shields.io/badge/license-MIT-007ec6)](LICENSE)
 
 **[English](README.md) · [简体中文](README.zh.md)**
@@ -48,12 +48,16 @@ no WebView, no HTML, no runtime to install.
 
 - **One-piece Dynamic Island** — the search field and the result panel are a single superellipse that morphs as it expands.
 - **Spring physics** — six independent transitions (summon / dismiss / expand / collapse, plus expanded variants), each with configurable duration, bounce and mass. Every animation is interruptible and re-solved per frame.
+- **Cascading reveal** — results surface row by row, each one staggered a few dozen milliseconds behind the previous, riding a short upward drift. Collapsing pins them in place instead, so the fade-out never smears.
+- **Smooth scrolling** — the wheel and keyboard navigation only move a target offset; a frame-rate-independent exponential approach (which composes exactly under a constant delta) does the rest, with a snap threshold so the tail never crawls.
 - **Three material presets** — Frosted glass, Mica and Opaque. Text colour and surface are resolved *as a pair*, so contrast is guaranteed in every preset.
 - **Row or grid** results, geometric keyboard navigation, hover snapping.
 - **Sharp CJK text** on layered windows — rounded glyph sizes, subpixel positioning off, slight hinting.
 
 ### Desktop integration
 
+- **Run as administrator** — hold the configured modifier (Shift by default) and confirm a result to launch it elevated. Windows routes it through the UAC prompt; Linux backends would map this to `sudo`. Elevation is a *platform capability*, so the business layer only ever asks "is a modifier held?".
+- **Fresh environment for every child** — the island is a long-lived process, yet children would inherit the environment block snapshotted at its own startup, so a Terminal opened from it would keep a stale `PATH` after you edited your system variables. The launcher now re-reads the system and user environment keys (merging them the way Windows does — user `PATH` appended to the system one, session-owned `TEMP`/`TMP` left alone), expands `%references%`, and diffs the result back into its own environment block on `WM_SETTINGCHANGE` and before each launch.
 - **System tray** — icon taken from the app's own `.ico` resource, rebuilt automatically when Explorer restarts.
 - **Settings GUI** — sidebar plus grouped cards; theme, geometry, hotkey, filters, web search and command aliases are all editable visually.
 - **Single instance** — launching it again summons the running one instead of fighting over the screen.
@@ -109,7 +113,7 @@ SKIA_BINARIES_URL="file://X:/path/to/skia-binaries-<key>.tar.gz" cargo build --r
 ```bash
 cargo run                      # debug build, console attached
 MEOWAL_VERBOSE=1 cargo run     # ...with debug-level logging
-cargo test                     # 79 tests
+cargo test                     # 111 tests
 ```
 
 ## Usage
@@ -171,6 +175,7 @@ src/
 │   └── svg.rs         # lightweight embedded SVG renderer
 ├── platform/
 │   ├── mod.rs         # Platform trait — the ONLY platform boundary
+│   ├── env.rs         # environment merging / expansion / diffing (pure)
 │   └── win32.rs       # Win32 implementation
 ├── animation/
 │   ├── mod.rs         # launcher springs
@@ -191,8 +196,9 @@ src/
     └── logger.rs      # logforth layout, colours, split log files
 ```
 
-`tests/` holds 79 tests across 16 files, covering springs, fuzzy matching, search, layout, shapes,
-the island state machine, the SVG renderer, text editing, the CLI parser, assets and a GPU smoke test.
+`tests/` holds 111 tests across 17 files, covering springs, fuzzy matching, search, layout, shapes,
+the island state machine, the SVG renderer, text editing, the CLI parser, environment-variable
+merging, assets and a GPU smoke test.
 
 ### Design rules
 
@@ -217,6 +223,7 @@ from the settings GUI.
 | `hotkey.enabled` | `true` | |
 | `hotkey.modifiers` | `"ctrl+alt"` | `ctrl` / `alt` / `shift` / `win`, combinable with `+` |
 | `hotkey.key` | `"space"` | |
+| `elevate_modifier` | `"shift"` | Hold this modifier to launch elevated: `disabled` / `shift` / `ctrl` / `alt` / `win` |
 | `window.layout` | `"row"` | `row` / `grid` |
 | `window.icon_size` | `36.0` | px |
 | `window.show_recent` | `false` | |
@@ -287,7 +294,7 @@ A loguru-style coloured console layout built on `logforth`:
 cargo test
 ```
 
-79 tests, no GPU or display required for the core suites (the GPU test degrades to a smoke check).
+111 tests, no GPU or display required for the core suites (the GPU test degrades to a smoke check).
 
 ## Roadmap
 

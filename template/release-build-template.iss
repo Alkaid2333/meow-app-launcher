@@ -3,7 +3,7 @@
 ; 仅供非商业使用
 
 #define MyAppName "MeowAppLauncher"
-#define MyAppVersion "1.7.0"
+#define MyAppVersion "1.8.0"
 #define MyAppPublisher "若有人兮233"
 #define MyAppURL "https://github.com/Alkaid2333"
 #define MyAppExeName "meowal.exe"

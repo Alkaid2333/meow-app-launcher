@@ -10,6 +10,7 @@
 //! * 系统托盘(图标/菜单/事件)喵
 //! * 全局热键、图标提取、应用启动喵
 
+pub mod env;
 pub mod win32;
 
 pub use win32::{Win32Platform, WinGpuContext};
@@ -91,6 +92,43 @@ pub enum Key {
     PageUp,
     PageDown,
     Delete,
+}
+
+/// 修饰键喵(平台无关: 按住它触发某种增强行为)喵
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Modifier {
+    Ctrl,
+    Shift,
+    Alt,
+    Win,
+}
+
+/// 某一刻按下的修饰键集合喵
+///
+/// 平台层采样一次「现在按着哪些修饰键」,业务层再决定要不要做增强动作喵。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModifierSet(u8);
+
+impl ModifierSet {
+    /// 空集合喵
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// 加一个修饰键喵
+    pub fn insert(&mut self, modifier: Modifier) {
+        self.0 |= 1 << (modifier as u8);
+    }
+
+    /// 这个修饰键此刻按着吗喵
+    pub fn contains(self, modifier: Modifier) -> bool {
+        self.0 & (1 << (modifier as u8)) != 0
+    }
+
+    /// 一个都没按喵
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
 }
 
 /// 平台无关窗口事件喵

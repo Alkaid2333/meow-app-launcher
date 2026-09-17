@@ -208,6 +208,8 @@ pub enum RowId {
     HotkeyEnabled,
     /// 重新录制全局热键喵
     HotkeyRecord,
+    /// 提权启动修饰键切换喵
+    ElevateModifier,
     /// 开机自启开关喵
     AutoStart,
     /// 渲染后端切换(CPU/GPU)喵

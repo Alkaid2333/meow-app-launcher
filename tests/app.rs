@@ -1,8 +1,9 @@
 //! 应用级状态与列表逻辑喵~ 单元测试喵
 
-use meow_app_launcher::app::config::{AppConfig, FilterRule, WindowConfig};
+use meow_app_launcher::app::config::{AppConfig, ElevateModifier, FilterRule, WindowConfig};
 use meow_app_launcher::app::{browse_list, ListItem};
 use meow_app_launcher::apps::{AppInfo, AppRegistry, AppSource};
+use meow_app_launcher::platform::{Modifier, ModifierSet};
 
 fn app(name: &str, fav: bool, count: u32, last: u64) -> AppInfo {
     AppInfo {
@@ -79,4 +80,47 @@ fn filter_rule_case_sensitive() {
     assert!(!strict.matches("uninstall"));
     // 空关键词永不命中喵
     assert!(!FilterRule::default().matches("任意应用"));
+}
+
+#[test]
+fn 提权修饰键循环回到起点() {
+    let mut m = ElevateModifier::default();
+    assert_eq!(m, ElevateModifier::Shift, "默认可用的档位应是 Shift 喵");
+    for _ in 0..ElevateModifier::ALL.len() {
+        m = m.cycle();
+    }
+    assert_eq!(m, ElevateModifier::Shift, "循环一圈应回到起点喵");
+}
+
+#[test]
+fn 提权修饰键档位与标签一一对应() {
+    assert_eq!(
+        ElevateModifier::Disabled.modifier(),
+        None,
+        "关闭档位不该绑定任何修饰键喵"
+    );
+    for m in ElevateModifier::ALL {
+        assert!(!m.label().is_empty());
+        assert_eq!(m.modifier().is_some(), m != ElevateModifier::Disabled);
+    }
+    /* 除关闭外每档都该落在不同修饰键上,不然切换毫无意义喵 */
+    let keys: Vec<Modifier> = ElevateModifier::ALL
+        .iter()
+        .filter_map(|m| m.modifier())
+        .collect();
+    for (i, k) in keys.iter().enumerate() {
+        assert!(!keys[i + 1..].contains(k), "{k:?} 重复绑定了喵");
+    }
+}
+
+#[test]
+fn 修饰键集合按位判定() {
+    let mut set = ModifierSet::empty();
+    assert!(set.is_empty());
+    set.insert(Modifier::Shift);
+    assert!(set.contains(Modifier::Shift));
+    assert!(!set.contains(Modifier::Ctrl), "没按的键不能误判喵");
+    set.insert(Modifier::Ctrl);
+    assert!(set.contains(Modifier::Shift) && set.contains(Modifier::Ctrl));
+    assert!(!set.is_empty());
 }

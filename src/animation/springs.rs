@@ -225,6 +225,21 @@ fn ease_out_back(t: f64) -> f64 {
     1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
 }
 
+/// 指数平滑逼近喵(帧率无关,永不超调)喵
+///
+/// 用 `1 − e^(−dt/τ)` 当插值系数,无论一帧多长,走过的「剩余比例」都一致——
+/// 这正好是滚动这类量的脾气: 要跟手、要顺,但绝不能回弹喵。
+/// `tau` 是时间常数(秒),越小越跟手;`tau <= 0` 退化成直接落位喵。
+pub fn smooth_toward(current: f64, target: f64, dt: f64, tau: f64) -> f64 {
+    if tau <= 0.0 {
+        return target;
+    }
+    if dt <= 0.0 || !current.is_finite() {
+        return current;
+    }
+    current + (target - current) * (1.0 - (-dt / tau).exp())
+}
+
 /// 名字 → 缓动函数（与 js 端 EASINGS 的 key 一一对应）
 pub fn easing_fn(name: &str) -> fn(f64) -> f64 {
     match name {

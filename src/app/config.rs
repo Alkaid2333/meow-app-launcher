@@ -158,6 +158,63 @@ impl RenderBackend {
     }
 }
 
+/// 提权启动的修饰键喵
+///
+/// 语义: 在启动器里按住这个修饰键再确认启动,就以管理员身份运行选中项喵。
+/// Windows 上管理员权限 = UAC 提权,Linux 未来对应 `sudo` —— 平台细节不在这里掺和喵。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ElevateModifier {
+    /// 关闭提权启动喵
+    Disabled,
+    /// 默认: 按住 Shift 启动喵
+    #[default]
+    Shift,
+    Ctrl,
+    Alt,
+    Win,
+}
+
+impl ElevateModifier {
+    /// 全部档位喵(配置 GUI 循环选项用)喵
+    pub const ALL: [ElevateModifier; 5] = [
+        Self::Disabled,
+        Self::Shift,
+        Self::Ctrl,
+        Self::Alt,
+        Self::Win,
+    ];
+
+    /// 给配置 GUI 看的名字喵
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Disabled => "关闭",
+            Self::Shift => "Shift",
+            Self::Ctrl => "Ctrl",
+            Self::Alt => "Alt",
+            Self::Win => "Win",
+        }
+    }
+
+    /// 循环切换喵
+    pub fn cycle(self) -> Self {
+        let all = Self::ALL;
+        let i = all.iter().position(|&m| m == self).unwrap_or(0);
+        all[(i + 1) % all.len()]
+    }
+
+    /// 对应的平台修饰键喵(关闭时为 None)喵
+    pub fn modifier(self) -> Option<crate::platform::Modifier> {
+        match self {
+            Self::Disabled => None,
+            Self::Shift => Some(crate::platform::Modifier::Shift),
+            Self::Ctrl => Some(crate::platform::Modifier::Ctrl),
+            Self::Alt => Some(crate::platform::Modifier::Alt),
+            Self::Win => Some(crate::platform::Modifier::Win),
+        }
+    }
+}
+
 /// 全局热键配置喵
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HotkeyConfig {
@@ -376,6 +433,9 @@ impl Default for SearchConfig {
 pub struct AppConfig {
     /// 全局热键喵
     pub hotkey: HotkeyConfig,
+    /// 提权启动修饰键喵(按住它启动 = 以管理员身份运行;默认 Shift)喵
+    #[serde(default)]
+    pub elevate_modifier: ElevateModifier,
     /// 浮窗窗口喵
     pub window: WindowConfig,
     /// 主题喵
@@ -406,6 +466,7 @@ impl Default for AppConfig {
         let island = IslandConfig::default();
         Self {
             hotkey: HotkeyConfig::default(),
+            elevate_modifier: ElevateModifier::default(),
             window: WindowConfig::default(),
             theme: ThemeConfig::default(),
             search: SearchConfig::default(),

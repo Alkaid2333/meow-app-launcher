@@ -8,14 +8,14 @@
 //! 不是 tuple struct,所以直接用指针、跨线程存储时转 usize 喵。
 
 use super::{
-    IconPixels, Key, PlatformWindow, SystemCommandKind, TrayEvent, TrayHandle, TrayHandler,
-    TrayMenuItem, WindowEvent, WindowHandler, WindowSpec,
+    IconPixels, Key, Modifier, ModifierSet, PlatformWindow, SystemCommandKind, TrayEvent,
+    TrayHandle, TrayHandler, TrayMenuItem, WindowEvent, WindowHandler, WindowSpec, env,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem::{size_of, zeroed};
 use std::ptr::null_mut;
-use std::sync::{Arc, Mutex, Once, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, Once, OnceLock};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::UI::WindowsAndMessaging::HICON;
@@ -58,6 +58,13 @@ const TRAY_CLASS_NAME: [u16; 15] = [
 static CLASS_ONCE: Once = Once::new();
 /// 托盘窗口类注册锁喵
 static TRAY_CLASS_ONCE: Once = Once::new();
+
+/// 转成 Win32 需要的宽字符串(NUL 结尾)喵
+///
+/// `*W` 系列 API 全都吃这个形态,包一层省得处处手敲喵。
+fn to_wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(Some(0)).collect()
+}
 
 // 各窗口的事件处理器喵(单线程,按 hwnd 索引)喵
 thread_local! {
@@ -117,6 +124,42 @@ impl Win32Platform {
 
     pub fn launch(&self, path: &str) -> bool {
         launch_impl(path)
+    }
+
+    /// 以管理员身份启动喵(Windows 走 UAC 提权,Linux 未来走 sudo)喵
+    pub fn launch_elevated(&self, path: &str) -> bool {
+        launch_elevated_impl(path)
+    }
+
+    /// 把进程环境变量同步到注册表最新值喵(启动子进程前 / 收到系统广播时调用)喵
+    pub fn refresh_environment(&self) -> bool {
+        refresh_process_environment()
+    }
+
+    /// 此刻按住了哪些修饰键喵
+    ///
+    /// 用异步键状态而非消息队列状态: 要的是「物理上按着没」,
+    /// 这样鼠标点选时按住修饰键也能识别喵。
+    pub fn held_modifiers(&self) -> ModifierSet {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+            GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+        };
+
+        let mut set = ModifierSet::empty();
+        let pressed = |vk: u16| unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0 };
+        if pressed(VK_CONTROL) {
+            set.insert(Modifier::Ctrl);
+        }
+        if pressed(VK_SHIFT) {
+            set.insert(Modifier::Shift);
+        }
+        if pressed(VK_MENU) {
+            set.insert(Modifier::Alt);
+        }
+        if pressed(VK_LWIN) || pressed(VK_RWIN) {
+            set.insert(Modifier::Win);
+        }
+        set
     }
 
     /// 带参数启动喵(explorer /select 打开所在位置等场景)喵
@@ -659,7 +702,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         DefWindowProcW, IDC_ARROW, LoadCursorW, SetCursor, WM_ACTIVATE, WM_CHAR, WM_CLOSE,
         WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY,
-        WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_SYSKEYDOWN, WM_TIMER,
+        WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SYSKEYDOWN, WM_TIMER,
     };
 
     match msg {
@@ -764,6 +807,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 unsafe { SetFocus(hwnd) };
             } else {
                 with_window_handler(hwnd, |h| h.on_event(WindowEvent::LostFocus));
+            }
+            0
+        }
+        // 系统设置变更: 只关心环境变量那一条,立刻刷新本进程环境块喵
+        // (用户在系统属性里改完变量就会广播到这里,不用等下次启动子进程)喵
+        WM_SETTINGCHANGE => {
+            if is_environment_change(lparam) {
+                refresh_process_environment();
             }
             0
         }
@@ -1526,6 +1577,174 @@ fn broadcast_environment_change() {
             );
         })
         .ok();
+}
+
+// ---------------------------------------------------------------------------
+// 进程环境变量同步喵
+// ---------------------------------------------------------------------------
+
+/// 增量同步状态喵(记住上一轮同步过哪些变量)喵
+static ENV_SYNC: LazyLock<Mutex<env::EnvSync>> =
+    LazyLock::new(|| Mutex::new(env::EnvSync::default()));
+
+/// 把本进程的环境块对齐到注册表里的最新值喵
+///
+/// 为什么要这么麻烦: 进程环境块是启动瞬间的快照,而我们**常驻不重启**,
+/// 用户在「系统属性 → 环境变量」里改完东西后,从我们这儿拉起的子进程
+/// (终端/编辑器…)拿到的还是旧值,只有重启应用才刷新——这显然不合理喵。
+///
+/// 于是改成: 读注册表两级环境键 → 合并展开 → 与本进程做差量 → 写回。
+/// 写的是**本进程自己**的环境块,子进程照旧继承,不必特殊照顾喵。
+pub fn refresh_process_environment() -> bool {
+    use windows_sys::Win32::System::Environment::SetEnvironmentVariableW;
+
+    let system = read_registry_env(MachineScope::System);
+    if system.is_empty() {
+        log::debug!("环境变量同步跳过: 系统环境键读不到内容喵");
+        return false;
+    }
+    let user = read_registry_env(MachineScope::User);
+
+    let merged = env::merge(&system, &user);
+    let fresh = env::expand_all(&merged, |name| std::env::var(name).ok());
+
+    let plan = match ENV_SYNC.lock() {
+        Ok(mut sync) => sync.plan(&fresh),
+        Err(_) => {
+            log::warn!("环境变量同步跳过: 状态锁已中毒喵");
+            return false;
+        }
+    };
+
+    // 先算出「真正变了的」数量,日志才有信息量(首次同步几乎每条都算写入)喵
+    let changed = plan
+        .set
+        .iter()
+        .filter(|(name, value)| std::env::var(name).ok().as_ref() != Some(value))
+        .count();
+
+    unsafe {
+        for (name, value) in &plan.set {
+            let name_wide = to_wide(name);
+            let value_wide = to_wide(value);
+            SetEnvironmentVariableW(name_wide.as_ptr(), value_wide.as_ptr());
+        }
+        for name in &plan.remove {
+            // 传 NULL 即删除,和用户手动删掉变量的语义一致喵
+            let name_wide = to_wide(name);
+            SetEnvironmentVariableW(name_wide.as_ptr(), std::ptr::null());
+        }
+    }
+
+    if changed > 0 || !plan.remove.is_empty() {
+        log::info!(
+            "环境变量已同步: 更新 {changed} 项, 移除 {} 项喵",
+            plan.remove.len()
+        );
+    } else {
+        log::debug!("环境变量无需变更(共 {} 项)喵", plan.set.len());
+    }
+    true
+}
+
+/// 注册表环境键的归属喵
+#[derive(Clone, Copy)]
+enum MachineScope {
+    /// `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment` 喵
+    System,
+    /// `HKCU\Environment` 喵
+    User,
+}
+
+/// 读一个注册表环境键下的所有字符串值喵
+///
+/// 只收 `REG_SZ` / `REG_EXPAND_SZ`(环境键里也只会有这两种),
+/// 展开与否交给 [`env::expand_all`],这里原样搬运喵。
+fn read_registry_env(scope: MachineScope) -> Vec<env::EnvEntry> {
+    use windows_sys::Win32::Foundation::ERROR_MORE_DATA;
+    use windows_sys::Win32::System::Registry::{
+        HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_EXPAND_SZ, REG_SZ, RegCloseKey,
+        RegEnumValueW, RegOpenKeyExW,
+    };
+
+    const SYSTEM_KEY: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+    const USER_KEY: &str = "Environment";
+
+    let (root, sub): (HKEY, &str) = match scope {
+        MachineScope::System => (HKEY_LOCAL_MACHINE, SYSTEM_KEY),
+        MachineScope::User => (HKEY_CURRENT_USER, USER_KEY),
+    };
+    let sub_wide = to_wide(sub);
+
+    let mut out = Vec::new();
+    unsafe {
+        let mut key: HKEY = null_mut();
+        if RegOpenKeyExW(root, sub_wide.as_ptr(), 0, KEY_READ, &mut key) != 0 {
+            log::debug!("环境变量同步: 读不到注册表键 {sub} 喵");
+            return out;
+        }
+
+        let mut name_buf = vec![0u16; 512];
+        let mut data_buf = vec![0u16; 16 * 1024];
+        let mut index = 0u32;
+        loop {
+            let mut name_len = name_buf.len() as u32;
+            let mut data_len = (data_buf.len() * 2) as u32;
+            let mut kind = 0u32;
+            let rc = RegEnumValueW(
+                key,
+                index,
+                name_buf.as_mut_ptr(),
+                &mut name_len,
+                std::ptr::null(),
+                &mut kind,
+                data_buf.as_mut_ptr() as *mut u8,
+                &mut data_len,
+            );
+            if rc == ERROR_MORE_DATA {
+                // 值比缓冲区还长(极端 PATH 才会有),扩容后重试同一个索引喵
+                data_buf.resize(data_buf.len() * 2, 0);
+                continue;
+            }
+            if rc != 0 {
+                break; // 枚举结束或出错,统一收尾喵
+            }
+            index += 1;
+            if kind != REG_SZ && kind != REG_EXPAND_SZ {
+                continue;
+            }
+            let name = String::from_utf16_lossy(&name_buf[..name_len as usize]);
+            let chars = (data_len as usize / 2).min(data_buf.len());
+            let value = String::from_utf16_lossy(&data_buf[..chars]);
+            out.push(env::EnvEntry {
+                name,
+                value: value.trim_end_matches('\0').to_string(),
+                expand: kind == REG_EXPAND_SZ,
+            });
+        }
+        let _ = RegCloseKey(key);
+    }
+    out
+}
+
+/// 判断 `WM_SETTINGCHANGE` 的 lParam 是不是 "Environment" 喵
+///
+/// lParam 是系统给的字符串指针,可能为空;最多扫视 32 个字符就收工,
+/// 不会读到不该读的地方喵。
+fn is_environment_change(lparam: LPARAM) -> bool {
+    const MAX_LEN: usize = 32;
+    if lparam == 0 {
+        return false;
+    }
+    let ptr = lparam as *const u16;
+    unsafe {
+        let mut len = 0usize;
+        while len < MAX_LEN && *ptr.add(len) != 0 {
+            len += 1;
+        }
+        let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+        text.eq_ignore_ascii_case("Environment")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2308,9 +2527,14 @@ fn exit_windows_impl(restart: bool) -> bool {
     }
 }
 
+/// 启动应用喵(走 shell 关联;启动前先把环境变量同步到最新)喵
 fn launch_impl(path: &str) -> bool {
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    // 子进程继承的是**本进程**的环境块,而本进程是常驻的:
+    // 开跑之前先对齐一次注册表,免得用户刚改的变量要等重启才生效喵。
+    refresh_process_environment();
 
     let path_wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
     let result = unsafe {
@@ -2333,10 +2557,52 @@ fn launch_impl(path: &str) -> bool {
     }
 }
 
+/// 以管理员身份启动应用喵
+///
+/// Windows 上「管理员权限」就是 UAC 提权,所以走 `runas` 动词,
+/// 由系统弹窗征求用户同意;未来 Linux 平台对应实现为 `sudo` 喵。
+/// 提权失败(典型: 用户在 UAC 弹窗上点了「否」)只记 warn,不当故障处理喵。
+fn launch_elevated_impl(path: &str) -> bool {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    /// ShellExecuteW 返回值 <=32 一律表示失败,5 是「用户拒绝了提权」喵
+    const ERROR_ACCESS_DENIED: isize = 5;
+
+    refresh_process_environment();
+
+    let path_wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+    let verb: Vec<u16> = "runas".encode_utf16().chain(Some(0)).collect();
+    let result = unsafe {
+        ShellExecuteW(
+            null_mut(),
+            verb.as_ptr(),
+            path_wide.as_ptr(),
+            null_mut(),
+            null_mut(),
+            SW_SHOWNORMAL,
+        )
+    };
+    let code = result as isize;
+    if code <= 32 {
+        if code == ERROR_ACCESS_DENIED {
+            log::warn!("提权启动已取消(用户拒绝了 UAC): {path} 喵");
+        } else {
+            log::error!("提权启动失败: {path} (code={code})");
+        }
+        false
+    } else {
+        log::info!("已以管理员身份启动: {path} 喵");
+        true
+    }
+}
+
 /// 带参数启动喵(explorer /select 打开所在位置等场景)喵
 fn launch_args_impl(path: &str, args: &str) -> bool {
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    refresh_process_environment();
 
     let path_wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
     let args_wide: Vec<u16> = args.encode_utf16().chain(Some(0)).collect();

@@ -47,6 +47,10 @@ fn main() {
 
     let platform = platform::platform();
 
+    // 常驻进程的环境块是启动时的快照: 开机自启的场景下这块可能已经存放很久了,
+    // 开机先对齐一次注册表,之后拉起的子进程就不会再用旧环境变量喵。
+    platform.refresh_environment();
+
     // 单实例保护喵: 已有实例在跑时,把「唤起」意图转交给它后退出
     // (再次启动 meowal = 呼出已有实例的搜索框,不再出现双岛互踩)喵
     if !platform.try_acquire_single_instance() {

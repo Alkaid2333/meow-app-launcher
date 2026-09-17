@@ -1,6 +1,6 @@
 //! 弹簧引擎物理参数喵~ 单元测试喵
 
-use meow_app_launcher::animation::springs::{Spring, SpringParams};
+use meow_app_launcher::animation::springs::{Spring, SpringParams, smooth_toward};
 
 /// 逐位对齐 js/spring.js（下面这些数字是 node 端 toPrecision(17) 打出来的）
 #[test]
@@ -72,4 +72,45 @@ fn 过冲量随_bounce_单调上升() {
         over = over.max(s.value - 100.0);
     }
     assert!((over - 15.7).abs() < 0.5, "bounce=0.3 过冲 {over} 应约 15.7");
+}
+
+
+#[test]
+fn 指数平滑永不超调且单调收敛() {
+    let mut v = 0.0;
+    let mut prev = 0.0;
+    for _ in 0..240 {
+        v = smooth_toward(v, 100.0, 1.0 / 240.0, 0.05);
+        assert!(v >= prev, "应单调逼近目标: {prev} → {v}");
+        assert!(v <= 100.0, "绝不能超过目标: {v}");
+        prev = v;
+    }
+    assert!((v - 100.0).abs() < 0.001, "240 帧(1 秒)后应基本到位: {v}");
+}
+
+#[test]
+fn 指数平滑与帧率无关() {
+    /* 一大步 vs 两小步,结果应当一致(恒定 dt 的指数逼近是可结合的)喵 */
+    let one = smooth_toward(0.0, 50.0, 1.0 / 60.0, 0.08);
+    let half = smooth_toward(0.0, 50.0, 1.0 / 120.0, 0.08);
+    let two = smooth_toward(half, 50.0, 1.0 / 120.0, 0.08);
+    assert!((one - two).abs() < 1e-9, "帧率不该影响手感: {one} vs {two}");
+}
+
+#[test]
+fn 指数平滑的退化与边界() {
+    assert_eq!(
+        smooth_toward(10.0, 30.0, 1.0 / 60.0, 0.0),
+        30.0,
+        "tau=0 应直接落位"
+    );
+    assert_eq!(
+        smooth_toward(10.0, 30.0, 0.0, 0.05),
+        10.0,
+        "dt=0 应原地不动"
+    );
+    assert!(
+        smooth_toward(f64::NAN, 30.0, 1.0 / 60.0, 0.05).is_nan(),
+        "非法输入不该被放大"
+    );
 }

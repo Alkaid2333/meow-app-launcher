@@ -2,6 +2,7 @@
 //!
 //! 一体灵动岛: 搜索槽与结果面板合成一块连续曲率圆角,视觉随主题预设喵。
 
+use crate::animation::island::{REVEAL_ROW_SPAN, REVEAL_STAGGER, cascade};
 use crate::app::{AppState, ListItem};
 use crate::render::font::FontCache;
 use crate::render::layout::Layout;
@@ -9,7 +10,12 @@ use crate::render::theme::Theme;
 use crate::render::{shape, text};
 use skia_safe::{BlurStyle, Canvas, Color, MaskFilter, Paint, Rect};
 
+/// 级联入场时每行从下方浮起的距离(逻辑 px)喵
+const REVEAL_RISE: f32 = 10.0;
+
 /// 绘制完整启动器场景喵
+///
+/// `reveal` 是内容级联入场的总进度(0..1),由灵动岛的动画通道给出喵。
 #[allow(clippy::too_many_arguments)]
 pub fn paint_scene(
     canvas: &Canvas,
@@ -21,6 +27,7 @@ pub fn paint_scene(
     ime_preedit: &str,
     caret: usize,
     selection: Option<(usize, usize)>,
+    reveal: f32,
 ) {
     canvas.clear(Color::TRANSPARENT);
     if layout.opacity <= 0.001 {
@@ -50,7 +57,7 @@ pub fn paint_scene(
     if layout.panel_height > 0.5 && layout.panel_opacity > 0.02 {
         let c2 = canvas.save();
         canvas.save_layer_alpha_f(None, layout.panel_opacity);
-        draw_items(canvas, theme, layout, state, fonts);
+        draw_items(canvas, theme, layout, state, fonts, reveal);
         canvas.restore_to_count(c2);
     }
 
@@ -260,6 +267,7 @@ fn draw_items(
     layout: &Layout,
     state: &mut AppState,
     fonts: &FontCache,
+    reveal: f32,
 ) {
     let path = shape::rounded_rect_path(layout.island_rect, layout.radius);
     canvas.save();
@@ -268,10 +276,21 @@ fn draw_items(
 
     let selected = state.selected;
     let grid = state.config.window.layout == crate::app::config::AppLayout::Grid;
+    let total = layout.item_rects.len();
     for (i, item_rect) in layout.item_rects.iter().enumerate() {
         if item_rect.bottom < layout.panel_rect.top || item_rect.top > layout.panel_rect.bottom {
             continue;
         }
+        // 级联入场: 越靠下的行越晚浮现 + 从下方轻轻浮起,像涟漪自上而下铺开喵
+        let p = cascade(reveal as f64, i, total, REVEAL_STAGGER, REVEAL_ROW_SPAN) as f32;
+        let layer = if p < 0.999 {
+            let c = canvas.save();
+            canvas.translate((0.0, (1.0 - p) * REVEAL_RISE));
+            canvas.save_layer_alpha_f(None, p.max(0.0));
+            Some(c)
+        } else {
+            None
+        };
         match state.results.get(i) {
             Some(ListItem::Section(title)) => draw_section(canvas, theme, item_rect, title, fonts),
             Some(ListItem::Item(item)) => {
@@ -293,6 +312,9 @@ fn draw_items(
                 );
             }
             None => {}
+        }
+        if let Some(c) = layer {
+            canvas.restore_to_count(c);
         }
     }
     canvas.restore();

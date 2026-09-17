@@ -248,21 +248,44 @@ impl AppState {
         self.run_item(&item)
     }
 
+    /// 这次启动要不要提权喵
+    ///
+    /// 只看「此刻有没有按住配置里那个修饰键」,不查平台配置的关闭状态——
+    /// 关掉提权时连平台都不问,省一次键态采样喵。
+    fn want_elevate(&self) -> bool {
+        self.config
+            .elevate_modifier
+            .modifier()
+            .is_some_and(|m| self.platform.held_modifiers().contains(m))
+    }
+
     /// 执行任意条目的动作喵(搜索结果与右键菜单共用)喵
     ///
     /// 应用条目顺带记录使用统计(次数 + 最近时间)喵。
     pub fn run_item(&mut self, item: &SearchItem) -> Option<String> {
         match &item.action {
             Action::Launch(path) => {
-                if !self.platform.launch(path) {
+                // 按住提权修饰键(默认 Shift)确认 → 以管理员身份运行喵
+                let elevated = self.want_elevate();
+                let launched = if elevated {
+                    self.platform.launch_elevated(path)
+                } else {
+                    self.platform.launch(path)
+                };
+                if !launched {
                     log::warn!("启动失败: {} ({}) 喵", item.title, path);
                     return None;
                 }
+                let verb = if elevated {
+                    "以管理员身份启动"
+                } else {
+                    "启动"
+                };
                 if let ItemIcon::App(app) = &item.icon {
-                    log::info!("启动应用: {} ({}) 喵", app.name, path);
+                    log::info!("{verb}应用: {} ({}) 喵", app.name, path);
                     self.record_launch(&app.name);
                 } else {
-                    log::info!("启动: {path} 喵");
+                    log::info!("{verb}: {path} 喵");
                 }
                 Some(item.title.clone())
             }

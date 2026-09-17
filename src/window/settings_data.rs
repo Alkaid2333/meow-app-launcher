@@ -8,7 +8,9 @@
 //! 动作按钮 / 输入框 / 应用行等结构型行不在此表,仍由页面层手工编排喵。
 
 use crate::animation::island::{EasingName, MotionMode};
-use crate::app::config::{AppConfig, AppLayout, RenderBackend, SearchMode, ThemePreset, WebEngine};
+use crate::app::config::{
+    AppConfig, AppLayout, ElevateModifier, RenderBackend, SearchMode, ThemePreset, WebEngine,
+};
 
 use crate::render::settings::RowId;
 
@@ -274,6 +276,22 @@ pub fn data_rows() -> Vec<RowDesc> {
             kind: RowKind::Switch,
             get: |c, _| RowValue::Bool(c.hotkey.enabled),
             set: |c, _, v| write_bool(v, c.hotkey.enabled, |b| c.hotkey.enabled = b),
+        },
+        RowDesc {
+            id: RowId::ElevateModifier,
+            label: "提权启动修饰键",
+            page: PAGE_GENERAL,
+            group: "热键",
+            index: 0,
+            kind: RowKind::Choice {
+                options: &["关闭", "Shift", "Ctrl", "Alt", "Win"],
+            },
+            get: |c, _| idx_of(&ElevateModifier::ALL, c.elevate_modifier),
+            set: |c, _, v| {
+                write_idx(&ElevateModifier::ALL, v, c.elevate_modifier, |m| {
+                    c.elevate_modifier = m
+                })
+            },
         },
         // ---- 常规 · 显示 ----
         RowDesc {

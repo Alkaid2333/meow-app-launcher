@@ -11,6 +11,7 @@
 //! * 隐藏(hide): 失焦/Esc/启动后 → 清空 → 隐藏窗口喵
 //! * 展开: 有结果时面板弹簧展开,无结果时折叠喵
 
+use crate::animation::springs::smooth_toward;
 use crate::animation::{clamp_dt, DynamicIsland};
 use crate::app::{Command, ListItem, SharedState};
 use crate::apps::AppInfo;
@@ -33,6 +34,10 @@ const HEARTBEAT_MS: u32 = 100;
 const CARET_HALF_PERIOD: Duration = Duration::from_millis(500);
 /// 拖拽启动阈值(物理 px)喵
 const DRAG_SLOP: f32 = 4.0;
+/// 滚动平滑时间常数(秒): 越小越跟手喵
+const SCROLL_TAU: f32 = 0.055;
+/// 滚动收敛阈值(逻辑 px): 低于它就吸附收尾,免得留一条永远走不完的尾巴喵
+const SCROLL_EPSILON: f32 = 0.35;
 
 /// 后台任务结果喵(异步任务完成后回传主线程)喵
 enum BgEvent {
@@ -66,8 +71,10 @@ pub struct Launcher {
     caret_acc: Duration,
     /// 上一帧时间喵
     last_tick: Option<Instant>,
-    /// 结果面板滚动偏移(逻辑像素)喵
+    /// 结果面板滚动偏移(逻辑像素,渲染用的当前值)喵
     scroll_offset: f32,
+    /// 滚动目标(滚轮/键盘只改这个,由心跳平滑逼近,避免跳位)喵
+    scroll_target: f32,
     /// BGRA 像素缓冲(复用)喵
     pixels: Vec<u8>,
     /// 后台任务结果发送端喵
@@ -187,6 +194,7 @@ impl Launcher {
             caret_acc: Duration::ZERO,
             last_tick: None,
             scroll_offset: 0.0,
+            scroll_target: 0.0,
             pixels: Vec::new(),
             bg_tx,
             bg_rx,
@@ -230,6 +238,7 @@ impl Launcher {
         log::info!("呼出搜索框喵~");
         self.visible = true;
         self.scroll_offset = 0.0;
+        self.scroll_target = 0.0;
         self.caret_on = true;
         self.caret_acc = Duration::ZERO;
         self.caret = 0;
@@ -464,10 +473,12 @@ impl Launcher {
         }
 
         // 拖动滚动条(仅滑块): 滚动不移动窗口,客户区坐标稳定可用喵
+        // 拖动要「即时跟手」,所以这里直接双写,不经过平滑喵
         if let Some(ref ds) = self.drag_scroll {
             let dy = y - ds.anchor_y;
             let prog = (ds.anchor_prog + dy / ds.travel).clamp(0.0, 1.0);
             self.scroll_offset = prog * ds.max_logical;
+            self.scroll_target = self.scroll_offset;
             self.request_render();
             return;
         }
@@ -618,6 +629,7 @@ impl Launcher {
         let count = self.state.borrow_mut().refresh_results();
         // 查询变化,滚动回到顶部喵
         self.scroll_offset = 0.0;
+        self.scroll_target = 0.0;
         log::debug!("查询更新: {:?}, 结果 {count} 条喵", self.state.borrow().query);
         // 为缺图标的条目发起异步提取喵
         self.request_missing_icons();
@@ -718,6 +730,7 @@ impl Launcher {
     fn ensure_selected_visible(&mut self) {
         if self.state.borrow().results.is_empty() {
             self.scroll_offset = 0.0;
+            self.scroll_target = 0.0;
             return;
         }
         let scale = self.platform.scale_factor().max(0.01);
@@ -737,7 +750,8 @@ impl Launcher {
             // 选中跑到视口下方 → 下滚补齐越界量喵
             scroll_px += r.bottom - (panel.bottom - pad);
         }
-        self.scroll_offset = scroll_px.clamp(0.0, max_px) / scale;
+        // 只改目标: 心跳会把它平滑走过去,省得内容一格格地跳喵
+        self.scroll_target = scroll_px.clamp(0.0, max_px) / scale;
     }
 
     /// 滚轮滚动结果面板喵
@@ -751,10 +765,29 @@ impl Launcher {
         if max_px <= 0.0 {
             return;
         }
-        let cur = self.scroll_offset * scale;
+        let cur = self.scroll_target * scale;
         let next = (cur - delta / 120.0 * 48.0 * scale).clamp(0.0, max_px);
-        self.scroll_offset = next / scale;
-        self.request_render();
+        self.scroll_target = next / scale;
+        self.start_animation();
+    }
+
+    /// 滚动平滑推进喵: 指数逼近目标,返回是否仍在滑动喵
+    ///
+    /// 只改目标的调用方 + 这一处统一逼近,于是所有来源的滚动
+    /// (滚轮 / 键盘导航 / 滚动条)都拿到同一种「顺滑而不跳」的手感喵。
+    fn step_scroll(&mut self, dt: f32) -> bool {
+        let delta = self.scroll_target - self.scroll_offset;
+        if delta.abs() <= SCROLL_EPSILON {
+            self.scroll_offset = self.scroll_target;
+            return false;
+        }
+        self.scroll_offset = smooth_toward(
+            self.scroll_offset as f64,
+            self.scroll_target as f64,
+            dt as f64,
+            SCROLL_TAU as f64,
+        ) as f32;
+        true
     }
 
     /// 执行选中条目的动作并隐藏喵
@@ -983,10 +1016,13 @@ impl Launcher {
         let scale = self.platform.scale_factor().max(0.01);
         self.island
             .set_stage(sw as f64 / scale as f64, sh as f64 / scale as f64);
+        let dt = clamp_dt(elapsed.as_secs_f32());
+        // 滚动平滑也走同一条心跳: 只改目标的调用方负责设目标,这里统一推进喵
+        let scrolling = self.step_scroll(dt);
         let animating = {
-            self.island.step(clamp_dt(elapsed.as_secs_f32()) as f64);
+            self.island.step(dt as f64);
             !self.island.settled()
-        };
+        } || scrolling;
 
         self.request_render();
 
@@ -1097,6 +1133,7 @@ impl Launcher {
                 &self.ime_preedit,
                 self.caret,
                 self.selection,
+                frame.reveal as f32,
             );
         }
 
