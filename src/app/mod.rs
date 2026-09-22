@@ -9,7 +9,7 @@
 
 pub mod config;
 
-use crate::apps::{AppInfo, AppRegistry, icon::IconManager};
+use crate::apps::{AppInfo, AppRegistry, ScanDelta, icon::IconManager};
 use crate::app::config::{AppConfig, SearchMode};
 use crate::platform::Win32Platform;
 use crate::search::{
@@ -134,22 +134,28 @@ impl AppState {
 
     /// 合并后台扫描结果进注册表喵(由主线程在收到异步扫描结果后调用)喵
     ///
-    /// 命中关键词过滤规则的启动项在入库前剔除,保持注册表干净喵。
-    pub fn merge_scanned(&mut self, scanned: Vec<AppInfo>) -> usize {
+    /// 命中关键词过滤规则的启动项在入库前剔除,保持注册表干净喵;
+    /// 被屏蔽的条目**不参与减量判断**,已在注册表里的应用不会被屏蔽词误删喵。
+    /// 因减量消失的应用会顺带清理图标快照与内存缓存喵。
+    pub fn merge_scanned(&mut self, scanned: Vec<AppInfo>) -> ScanDelta {
         let total = scanned.len();
         let visible: Vec<AppInfo> = scanned
             .into_iter()
             .filter(|a| !self.config.is_app_filtered(&a.name))
             .collect();
         let skipped = total.saturating_sub(visible.len());
-        let added = self.registry.merge_scanned(visible);
+        let delta = self.registry.merge_scanned(visible);
+        // 减量消失的应用,把图标快照和内存缓存一起带走喵
+        for name in &delta.removed_names {
+            self.icons.evict(name);
+        }
         self.search.sync(&self.registry.apps);
         self.persist();
         if skipped > 0 {
             log::info!("扫描完成,过滤排除 {skipped} 个应用喵");
         }
-        log::info!("应用扫描完成,新增 {added} 个喵");
-        added
+        log::info!("应用扫描完成,{} 喵", delta.summary());
+        delta
     }
 
     /// 记录一次应用启动喵(次数 + 最近时间)喵
@@ -185,6 +191,8 @@ impl AppState {
         let q = self.query.trim().to_string();
         self.results = if q.is_empty() {
             browse_list(&self.registry, &self.config)
+        } else if let Some(items) = command_mode_items(&q) {
+            items
         } else {
             self.aggregated_results(&q)
         };
@@ -311,6 +319,12 @@ impl AppState {
                 }
                 Some(item.title.clone())
             }
+            // shell 指令是潜在的长任务: 执行权交给启动器(后台线程 + 通知反馈),
+            // 这里同步跑会卡死 UI 线程,直接不执行喵
+            Action::ShellCommand(script) => {
+                log::debug!("shell 指令应由启动器异步执行: {script} 喵");
+                None
+            }
         }
     }
 
@@ -383,9 +397,10 @@ impl AppState {
         self.persist();
     }
 
-    /// 移除应用喵
+    /// 移除应用喵(注册表 + 搜索索引 + 图标痕迹一起带走)喵
     pub fn remove_app(&mut self, name: &str) {
         self.registry.remove(name);
+        self.icons.evict(name);
         self.search.sync(&self.registry.apps);
         self.persist();
     }
@@ -394,11 +409,12 @@ impl AppState {
 /// 把多源聚合的带分条目整理成最终列表喵(纯函数,便于单测)喵
 ///
 /// 规则: 应用等条目按分数降序(同分按标题)截断到 [`MAX_RESULTS`];
-/// **系统指令单独成组置底**——与应用彻底隔离,避免误触关机类指令喵。
+/// **指令(系统命令 + 自定义 shell 指令)单独成组置底**——与应用彻底隔离,
+/// 避免误触关机类指令喵。
 pub fn aggregate_items(scored: Vec<Scored>) -> Vec<ListItem> {
     let (mut commands, mut rest): (Vec<Scored>, Vec<Scored>) = scored
         .into_iter()
-        .partition(|s| matches!(s.item.action, Action::SystemCommand(_)));
+        .partition(|s| matches!(s.item.action, Action::SystemCommand(_) | Action::ShellCommand(_)));
     let by_rank = |a: &Scored, b: &Scored| {
         b.score
             .partial_cmp(&a.score)
@@ -415,6 +431,32 @@ pub fn aggregate_items(scored: Vec<Scored>) -> Vec<ListItem> {
         items.extend(commands.into_iter().map(|s| ListItem::Item(s.item)));
     }
     items
+}
+
+/// 灵动岛指令模式喵: `> ` 开头的查询自动识别为 shell 指令喵
+///
+/// 返回 `Some(列表)` 表示已进入指令模式(不再注入应用/计算器/Web 等结果);
+/// 纯函数,便于单测喵。
+pub fn command_mode_items(query: &str) -> Option<Vec<ListItem>> {
+    let script = query.strip_prefix('>')?.trim();
+    let title = if script.is_empty() {
+        "输入要执行的指令喵".to_string()
+    } else {
+        format!("执行指令: {script}")
+    };
+    Some(vec![
+        ListItem::Section("指令".into()),
+        ListItem::Item(SearchItem {
+            title,
+            subtitle: Some(if script.is_empty() {
+                "例如: > ipconfig /flushdns 喵".to_string()
+            } else {
+                format!("按 Enter 用 shell 执行喵 · {script}")
+            }),
+            icon: crate::search::ItemIcon::Builtin(crate::search::BuiltinIcon::Power),
+            action: Action::ShellCommand(script.to_string()),
+        }),
+    ])
 }
 
 /// 空查询推荐列表喵(过滤规则命中的应用先行剔除)喵

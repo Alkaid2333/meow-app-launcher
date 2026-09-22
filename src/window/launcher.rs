@@ -41,10 +41,12 @@ const SCROLL_EPSILON: f32 = 0.35;
 
 /// 后台任务结果喵(异步任务完成后回传主线程)喵
 enum BgEvent {
-    /// 应用扫描完成喵
+    /// 应用扫描完成喵(增减量在主线程合并注册表时统计)喵
     Scanned(Vec<AppInfo>),
     /// 图标提取完成喵
     Icon { name: String, image: Option<Image> },
+    /// shell 指令执行完成喵(结果走系统通知反馈)喵
+    ShellDone { title: String, result: Result<String, String> },
 }
 
 /// 启动器窗口喵
@@ -791,7 +793,18 @@ impl Launcher {
     }
 
     /// 执行选中条目的动作并隐藏喵
+    ///
+    /// shell 指令在这里特殊分派: 交后台线程执行 + 通知反馈,
+    /// 不让潜在的长任务卡住 UI 线程喵。
     fn execute_selected(&mut self) {
+        let item = self.state.borrow().selected_item().cloned();
+        if let Some(item) = &item
+            && let crate::search::Action::ShellCommand(script) = &item.action
+        {
+            self.run_shell_async(item.title.clone(), script.clone());
+            self.hide();
+            return;
+        }
         let executed = self.state.borrow_mut().execute_selected();
         if executed.is_none() {
             log::debug!("没有可执行的条目喵");
@@ -826,6 +839,40 @@ impl Launcher {
         self.platform.quit();
     }
 
+    /// 按当前配置重新注册全部全局热键喵(呼出 + 扫描两路)喵
+    fn apply_hotkeys(&mut self) {
+        self.platform.unregister_global_hotkey();
+        self.platform.unregister_scan_hotkey();
+
+        let hotkey = self.state.borrow().config.hotkey.clone();
+        if hotkey.enabled {
+            let ok = self
+                .platform
+                .register_global_hotkey(&hotkey.modifiers, &hotkey.key, self.window);
+            log::info!(
+                "呼出热键已重注册: {}+{} 成功={ok} 喵",
+                hotkey.modifiers,
+                hotkey.key
+            );
+        } else {
+            log::info!("呼出热键已禁用喵");
+        }
+
+        let scan = self.state.borrow().config.scan_hotkey.clone();
+        if scan.enabled {
+            let ok = self
+                .platform
+                .register_scan_hotkey(&scan.modifiers, &scan.key, self.window);
+            log::info!(
+                "扫描热键已重注册: {}+{} 成功={ok} 喵",
+                scan.modifiers,
+                scan.key
+            );
+        } else {
+            log::info!("扫描热键已禁用喵");
+        }
+    }
+
     /// 退出应用喵
     fn quit(&mut self) {
         log::info!("退出应用喵~");
@@ -842,22 +889,7 @@ impl Launcher {
                 Command::OpenAppManager => self.open_app_manager(),
                 Command::Rescan => self.spawn_scan(),
                 Command::Restart => self.restart(),
-                Command::ReapplyHotkey => {
-                    self.platform.unregister_global_hotkey();
-                    let hotkey = self.state.borrow().config.hotkey.clone();
-                    if hotkey.enabled {
-                        let ok = self
-                            .platform
-                            .register_global_hotkey(&hotkey.modifiers, &hotkey.key, self.window);
-                        log::info!(
-                            "全局热键已重注册: {}+{} 成功={ok} 喵",
-                            hotkey.modifiers,
-                            hotkey.key
-                        );
-                    } else {
-                        log::info!("全局热键已禁用喵");
-                    }
-                }
+                Command::ReapplyHotkey => self.apply_hotkeys(),
                 Command::RecreateRenderer => self.recreate_renderer(),
                 Command::Quit => self.quit(),
             }
@@ -874,6 +906,21 @@ impl Launcher {
         std::thread::spawn(move || {
             let apps = crate::apps::scanner::scan_installed_apps();
             let _ = tx.send(BgEvent::Scanned(apps));
+        });
+        log::info!("已发起应用后台扫描喵~");
+    }
+
+    /// 后台执行 shell 指令喵(结果经系统通知反馈)喵
+    ///
+    /// shell 按当前配置解析,执行完把输出发回主线程弹通知喵。
+    fn run_shell_async(&mut self, title: String, script: String) {
+        let platform = self.platform.clone();
+        let shell = self.state.borrow().config.search.shell;
+        let tx = self.bg_tx.clone();
+        log::info!("shell 指令已提交后台执行喵: {script}");
+        std::thread::spawn(move || {
+            let result = platform.run_shell(shell, &script);
+            let _ = tx.send(BgEvent::ShellDone { title, result });
         });
     }
 
@@ -916,12 +963,30 @@ impl Launcher {
         while let Ok(event) = self.bg_rx.try_recv() {
             match event {
                 BgEvent::Scanned(apps) => {
-                    self.state.borrow_mut().merge_scanned(apps);
+                    let delta = self.state.borrow_mut().merge_scanned(apps);
+                    // 有增减变化就通过系统通知告诉用户喵(同步扫描在日常很少触发)喵
+                    if delta.any() {
+                        self.platform
+                            .show_notification("应用扫描完成", &delta.summary());
+                    }
                 }
                 BgEvent::Icon { name, image } => {
                     self.pending_icons.remove(&name);
                     self.state.borrow_mut().icons.cache_image(name, image);
                 }
+                BgEvent::ShellDone { title, result } => match result {
+                    Ok(output) => {
+                        let body = if output.is_empty() {
+                            "执行完成,无输出喵".to_string()
+                        } else {
+                            output
+                        };
+                        self.platform.show_notification(&format!("{title} · 完成"), &body);
+                    }
+                    Err(err) => {
+                        self.platform.show_notification(&format!("{title} · 失败"), &err);
+                    }
+                },
             }
         }
     }
@@ -1146,6 +1211,11 @@ impl WindowHandler for Launcher {
     fn on_event(&mut self, event: WindowEvent) {
         match event {
             WindowEvent::Hotkey => self.toggle(),
+            // 扫描热键: 后台默默扫一遍,结果用系统通知喵(不呼出不抢焦点)喵
+            WindowEvent::ScanHotkey => {
+                log::info!("扫描热键触发,开始后台扫描应用喵~");
+                self.spawn_scan();
+            }
             WindowEvent::KeyDown(key) => self.on_key(key),
             WindowEvent::Char(ch) => self.on_char(ch),
             WindowEvent::ImePreedit(text) => self.on_ime_preedit(text),

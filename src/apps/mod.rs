@@ -79,6 +79,29 @@ pub struct AppRegistry {
     pub apps: Vec<AppInfo>,
 }
 
+/// 一轮扫描的增减量统计喵
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScanDelta {
+    /// 新注册的应用数喵
+    pub added: usize,
+    /// 因消失而移除的应用数喵(卸载/快捷方式被删)喵
+    pub removed: usize,
+    /// 被移除的应用名喵(供调用方清理图标快照)喵
+    pub removed_names: Vec<String>,
+}
+
+impl ScanDelta {
+    /// 有任何变化吗喵
+    pub fn any(&self) -> bool {
+        self.added > 0 || self.removed > 0
+    }
+
+    /// 给通知看的一句话摘要喵
+    pub fn summary(&self) -> String {
+        format!("新增 {} 个,移除 {} 个应用喵", self.added, self.removed)
+    }
+}
+
 impl AppRegistry {
     /// 从磁盘加载应用注册表喵,失败则空表喵~
     pub fn load(data_dir: &Path) -> Self {
@@ -146,9 +169,32 @@ impl AppRegistry {
         self.apps.iter().find(|a| a.name == name)
     }
 
-    /// 合并扫描到的应用喵(保留已有的手动信息: tag/收藏/计数)喵
-    pub fn merge_scanned(&mut self, scanned: Vec<AppInfo>) -> usize {
-        let mut added = 0;
+    /// 合并扫描结果进注册表喵(增量注册 + 减量移除,双向同步)喵
+    ///
+    /// * 增量: 扫描集里出现的新名字 → 注册喵
+    /// * 更新: 同名应用的路径变了 → 跟随更新(保留 tag/收藏/计数等用户信息)喵
+    /// * 减量: 已注册的扫描来源应用,**名字不在本轮扫描集里** → 移除
+    ///   (应用被卸载或快捷方式被手动删除后,注册表不再留孤儿喵)
+    ///
+    /// 减量比较基于传入的**完整扫描集**: 上层因屏蔽词拦下的条目不算消失,
+    /// 否则加个屏蔽词就会把正常应用从注册表里误删喵。
+    /// 返回增减量统计;调用方负责对被移除的应用做图标清理喵。
+    pub fn merge_scanned(&mut self, scanned: Vec<AppInfo>) -> ScanDelta {
+        // 减量: 拿「扫描集里的全部名字」当存活名单喵
+        let alive: std::collections::HashSet<&str> =
+            scanned.iter().map(|a| a.name.as_str()).collect();
+        let gone: Vec<String> = self
+            .apps
+            .iter()
+            .filter(|a| a.source == AppSource::Scanned && !alive.contains(a.name.as_str()))
+            .map(|a| a.name.clone())
+            .collect();
+        for name in &gone {
+            self.remove(name);
+        }
+
+        // 增量 + 更新喵
+        let mut delta = ScanDelta { removed: gone.len(), removed_names: gone, ..Default::default() };
         for app in scanned {
             let existing = self.find(&app.name);
             if let Some(existing) = existing {
@@ -163,16 +209,16 @@ impl AppRegistry {
                     }
             } else {
                 self.apps.push(app);
-                added += 1;
+                delta.added += 1;
             }
         }
-        log::debug!("扫描合并完成: 新增 {added} 个应用喵");
-        added
+        log::debug!("扫描合并完成: 新增 {} 个,移除 {} 个应用喵", delta.added, delta.removed);
+        delta
     }
 }
 
 /// 清理文件名里的非法字符(用于图标快照文件名)喵
-fn sanitize_file_name(name: &str) -> String {
+pub(crate) fn sanitize_file_name(name: &str) -> String {
     let invalid = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
     let mut out: String = name
         .chars()

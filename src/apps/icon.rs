@@ -77,6 +77,23 @@ impl IconManager {
         self.cache.insert(name, image);
     }
 
+    /// 清掉一个应用的全部图标痕迹喵(内存缓存 + 磁盘快照)喵
+    ///
+    /// 应用被移除/扫描减量后调用,免得残留快照越积越多喵。
+    pub fn evict(&mut self, name: &str) {
+        self.cache.remove(name);
+        // 文件名进过 sanitize,这里按同样规则还原喵
+        let snapshot = self
+            .data_dir
+            .join(ICON_DIR_NAME)
+            .join(format!("{}.png", super::sanitize_file_name(name)));
+        match std::fs::remove_file(&snapshot) {
+            Ok(_) => log::debug!("已清理图标快照: {} 喵", snapshot.display()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => log::warn!("图标快照清理失败({e}): {} 喵", snapshot.display()),
+        }
+    }
+
     /// 造一个后台提取器喵(克隆平台句柄与数据目录,可安全移入异步任务)喵
     pub fn extractor(&self) -> IconExtractor {
         IconExtractor {

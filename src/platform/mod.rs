@@ -154,6 +154,8 @@ pub enum WindowEvent {
     MouseWheel(f32),
     /// 窗口失去激活(前台切走)喵
     LostFocus,
+    /// 扫描热键触发喵(后台扫描应用,不呼出搜索框)喵
+    ScanHotkey,
     /// 定时器触发(动画帧驱动)喵
     Timer,
     /// 按键组合喵(修饰键 + 主键,供配置 GUI 录制热键使用)喵
@@ -204,9 +206,20 @@ pub enum SystemCommandKind {
     Shutdown,
     /// 重启喵
     Restart,
+    /// 自定义指令喵(执行 [`CommandEntry::script`],由平台 shell 跑)喵
+    Custom,
 }
 
 impl SystemCommandKind {
+    /// 全部档位喵(配置 GUI 循环选项用)喵
+    pub const ALL: [SystemCommandKind; 5] = [
+        Self::Lock,
+        Self::Sleep,
+        Self::Shutdown,
+        Self::Restart,
+        Self::Custom,
+    ];
+
     /// 给搜索结果看的名字喵(唯一出处,配置 GUI 也用它)喵
     pub fn title(self) -> &'static str {
         match self {
@@ -214,8 +227,66 @@ impl SystemCommandKind {
             Self::Sleep => "睡眠",
             Self::Shutdown => "关机",
             Self::Restart => "重启",
+            Self::Custom => "自定义",
         }
     }
+
+    /// 循环切换喵(配置 GUI 指令卡片的类型按钮)喵
+    pub fn cycle(self) -> Self {
+        let all = Self::ALL;
+        let i = all.iter().position(|&k| k == self).unwrap_or(0);
+        all[(i + 1) % all.len()]
+    }
+}
+
+/// 指令执行 shell 喵(每平台提供自己的档位,配置 GUI 可切换)喵
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellKind {
+    /// Windows PowerShell 喵(默认,语法现代)喵
+    #[default]
+    Powershell,
+    /// 传统命令提示符喵(兼容老脚本)喵
+    Cmd,
+}
+
+impl ShellKind {
+    /// 全部档位喵(配置 GUI 循环选项用)喵
+    pub const ALL: [ShellKind; 2] = [Self::Powershell, Self::Cmd];
+
+    /// 给配置 GUI 看的名字喵
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Powershell => "PowerShell",
+            Self::Cmd => "Cmd",
+        }
+    }
+
+    /// 循环切换喵
+    pub fn cycle(self) -> Self {
+        let all = Self::ALL;
+        let i = all.iter().position(|&s| s == self).unwrap_or(0);
+        all[(i + 1) % all.len()]
+    }
+}
+
+/// 指令执行特质喵: 在指定 shell 里跑一条指令,拿到合并输出喵
+///
+/// 接口归 `platform/`,每个平台各实现一份(Windows = PowerShell/Cmd 子进程,
+/// Linux 未来对应 sh/zsh 等);业务层永远只摸 trait,不碰平台 API 喵。
+/// 执行是**阻塞**的,调用方必须放在后台线程喵。
+pub trait ShellRunner {
+    /// 执行指令喵,成功返回合并后的输出文本(已截断),失败返回错误描述喵
+    fn run_shell(&self, shell: ShellKind, command: &str) -> Result<String, String>;
+}
+
+/// 系统通知特质喵: 弹一条系统级通知(接口归 platform/,平台各自实现)喵
+///
+/// Windows 用托盘气泡,其他平台未来对接各自的通知中心喵。
+/// 设计为异步友好: 实现必须快速返回,不允许长时间阻塞调用线程喵。
+pub trait NotificationSink {
+    /// 弹一条通知喵(title 标题,body 正文)喵
+    fn show_notification(&self, title: &str, body: &str);
 }
 
 /// 获取当前平台的实现喵(按编译目标自动选择)喵

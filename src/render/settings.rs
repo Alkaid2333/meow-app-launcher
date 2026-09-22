@@ -50,6 +50,8 @@ const GROUP_RADIUS: f32 = 8.0;
 const GROUP_PADDING: f32 = 14.0;
 /// 普通行高喵
 const ROW_HEIGHT: f32 = 44.0;
+/// 自定义指令脚本输入框的额外行高喵(叠在指令行下方)喵
+const SCRIPT_ROW_HEIGHT: f32 = 36.0;
 /// 分组标题行高喵
 const SECTION_HEIGHT: f32 = 30.0;
 /// 分组间距喵
@@ -124,10 +126,13 @@ pub enum SettingsRow {
         case_sensitive: bool,
     },
     /// 系统指令行喵(index 对应配置 commands 下标;aliases 为逗号连接的展示串)喵
+    ///
+    /// `kind` 为自定义时 `script` 是要执行的 shell 指令文本喵。
     Command {
         index: usize,
         kind: crate::platform::SystemCommandKind,
         aliases: String,
+        script: String,
     },
 }
 
@@ -164,6 +169,8 @@ pub enum RowHit {
     CommandKind(usize),
     /// 指令别名输入框(下标)喵
     CommandAlias(usize),
+    /// 自定义指令的脚本输入框(下标)喵
+    CommandScript(usize),
     /// 删除指令(下标)喵
     CommandDelete(usize),
     /// 恢复该项默认值喵
@@ -231,8 +238,16 @@ pub enum RowId {
     CommandKind(usize),
     /// 编辑指令别名喵
     CommandAlias(usize),
+    /// 编辑自定义指令脚本喵
+    CommandScript(usize),
     /// 删除指令喵
     CommandDelete(usize),
+    /// 自定义指令执行 shell 切换喵
+    ShellKind,
+    /// 扫描热键开关喵
+    ScanHotkeyEnabled,
+    /// 重新录制扫描热键喵
+    ScanHotkeyRecord,
     SpringDuration(u8),
     SpringBounce(u8),
 }
@@ -257,15 +272,17 @@ pub struct EditFocus<'a> {
     pub filter: Option<(usize, &'a TextEdit)>,
     /// 正在编辑的指令别名行(下标)喵
     pub command: Option<(usize, &'a TextEdit)>,
+    /// 正在编辑的自定义指令脚本行(下标)喵
+    pub script: Option<(usize, &'a TextEdit)>,
     /// 正在编辑的自定义浏览器输入喵
     pub browser: Option<&'a TextEdit>,
 }
 
 /// 绘制配置窗口喵,返回布局结果喵
 ///
-/// `edit` 为当前正在编辑的文本焦点(数值/过滤关键词/标签三类输入框);
-/// `recording` 为热键录制中;`dirty` 为偏离默认值的行(行首画恢复图标);
-/// `fade` 为内容区淡入透明度(1.0 = 不透明,页面切换动画用)喵。
+/// `edit` 为当前正在编辑的文本焦点(数值/过滤关键词/指令脚本等输入框);
+/// `recording` 为正在录制热键的按钮行(无则不在录制中);`dirty` 为偏离默认值的行
+/// (行首画恢复图标);`fade` 为内容区淡入透明度(1.0 = 不透明,页面切换动画用)喵。
 /// `width`/`height` 为窗口当前逻辑尺寸(支持拖拽缩放)喵。
 #[allow(clippy::too_many_arguments)]
 pub fn paint_settings(
@@ -277,7 +294,7 @@ pub fn paint_settings(
     scroll: f32,
     fade: f32,
     edit: EditFocus,
-    recording: bool,
+    recording: Option<RowId>,
     dirty: &[RowId],
     width: f32,
     height: f32,
@@ -516,7 +533,7 @@ fn paint_content(
     scroll: f32,
     fade: f32,
     edit: EditFocus,
-    recording: bool,
+    recording: Option<RowId>,
     dirty: &[RowId],
     width: f32,
     height: f32,
@@ -564,8 +581,9 @@ fn paint_content(
     let mut y = HEADER_HEIGHT + 10.0;
 
     for group in &page.groups {
-        // 计算分组高度喵
-        let group_h = SECTION_HEIGHT + group.rows.len() as f32 * ROW_HEIGHT + GROUP_PADDING * 2.0;
+        // 计算分组高度喵(指令自定义行会带出脚本输入框,行高可变)喵
+        let rows_h: f32 = group.rows.iter().map(row_height).sum();
+        let group_h = SECTION_HEIGHT + rows_h + GROUP_PADDING * 2.0;
         let group_rect = Rect::from_xywh(
             content_left + CONTENT_PADDING,
             y,
@@ -609,17 +627,18 @@ fn paint_content(
         );
         crate::render::text::draw_clipped(canvas, &group.title, title_rect, &fonts.font(12.0), &title_paint);
 
-        // 分组内行喵
+        // 分组内行喵(行高随行型变化,自定义指令行带脚本输入框)喵
         let mut row_y = group_rect.top + SECTION_HEIGHT;
         for row in &group.rows {
+            let rh = row_height(row);
             let row_rect = Rect::from_xywh(
                 group_rect.left + GROUP_PADDING,
                 row_y,
                 group_rect.width() - GROUP_PADDING * 2.0,
-                ROW_HEIGHT,
+                rh,
             );
             paint_row(canvas, theme, fonts, row, row_rect, scroll, viewport, edit, recording, dirty, hits);
-            row_y += ROW_HEIGHT;
+            row_y += rh;
         }
 
         y += group_h + GROUP_GAP;
@@ -667,6 +686,16 @@ fn paint_content(
     (content_height, scrollbar)
 }
 
+/// 行高喵(绝大多数行一档标准高;自定义指令行多出一块脚本输入框)喵
+fn row_height(row: &SettingsRow) -> f32 {
+    match row {
+        SettingsRow::Command { kind: crate::platform::SystemCommandKind::Custom, .. } => {
+            ROW_HEIGHT + SCRIPT_ROW_HEIGHT
+        }
+        _ => ROW_HEIGHT,
+    }
+}
+
 /// 绘制单行控件喵
 ///
 /// `viewport` 为内容区可视范围(窗口坐标): 滚出视口的行不再登记命中区,
@@ -681,7 +710,7 @@ fn paint_row(
     scroll: f32,
     viewport: Rect,
     edit: EditFocus,
-    recording: bool,
+    recording: Option<RowId>,
     dirty: &[RowId],
     hits: &mut Vec<(Rect, RowHit)>,
 ) {
@@ -775,8 +804,8 @@ fn paint_row(
         SettingsRow::Button { id, label } => {
             let mut btn_rect = rect;
             btn_rect.inset((0.0, 8.0));
-            // 热键录制中: 高亮成强调色,提示「正在等待按键」喵
-            let rec = *id == RowId::HotkeyRecord && recording;
+            // 热键录制中: 对应按钮高亮成强调色,提示「正在等待按键」喵
+            let rec = recording == Some(*id);
             draw_flat_button(canvas, theme, fonts, btn_rect, label, ButtonTone::for_id(*id, rec));
             push_hit(rect, RowHit::Button(*id));
         }
@@ -898,11 +927,14 @@ fn paint_row(
             draw_icon_button(canvas, theme, del_rect, "close", theme.text);
             push_hit(del_rect, RowHit::FilterDelete(*index));
         }
-        SettingsRow::Command { index, kind, aliases } => {
+        SettingsRow::Command { index, kind, aliases, script } => {
             // 指令行: 左侧别名输入框 + 中部命令类型按钮 + 右侧删除按钮喵
+            // 主行控件永远锚在「上半段」(ROW_HEIGHT 区)的中心:
+            // 自定义档行会往下长出脚本框,整行中心会偏,不能再用 center_y 喵
+            let main_cy = rect.top + ROW_HEIGHT * 0.5;
             let input_rect = Rect::from_xywh(
                 rect.left,
-                rect.center_y() - 14.0,
+                main_cy - 14.0,
                 (rect.width() - 178.0).max(120.0),
                 28.0,
             );
@@ -943,8 +975,8 @@ fn paint_row(
             }
             push_hit(input_rect, RowHit::CommandAlias(*index));
 
-            // 命令类型循环按钮(点击在 锁屏/睡眠/关机/重启 间轮换)喵
-            let kind_rect = Rect::from_xywh(rect.right - 136.0, rect.center_y() - 14.0, 92.0, 28.0);
+            // 命令类型循环按钮(点击在 锁屏/睡眠/关机/重启/自定义 间轮换)喵
+            let kind_rect = Rect::from_xywh(rect.right - 136.0, main_cy - 14.0, 92.0, 28.0);
             let kind_path = shape::rounded_rect_path(kind_rect, CTRL_RADIUS);
             let mut kbg = Paint::default();
             kbg.set_color(theme.control_bg);
@@ -957,15 +989,67 @@ fn paint_row(
             kb.set_stroke_width(1.0);
             canvas.draw_path(&kind_path, &kb);
             let mut kp = Paint::default();
-            kp.set_color(theme.text);
+            let kind_color = if *kind == crate::platform::SystemCommandKind::Custom {
+                theme.accent
+            } else {
+                theme.text
+            };
+            kp.set_color(kind_color);
             kp.set_anti_alias(true);
             crate::render::text::draw_centered(canvas, kind.title(), kind_rect, &fonts.font(12.0), &kp);
             push_hit(kind_rect, RowHit::CommandKind(*index));
 
             // 删除按钮(内嵌关闭 SVG)喵
-            let del_rect = Rect::from_xywh(rect.right - 34.0, rect.center_y() - 13.0, 26.0, 26.0);
+            let del_rect = Rect::from_xywh(rect.right - 34.0, main_cy - 13.0, 26.0, 26.0);
             draw_icon_button(canvas, theme, del_rect, "close", theme.text);
             push_hit(del_rect, RowHit::CommandDelete(*index));
+
+            // 自定义档位: 下半段居中铺一条脚本输入框喵(写啥跑啥,由配置的 shell 执行)喵
+            if *kind == crate::platform::SystemCommandKind::Custom {
+                let script_cy = rect.top + ROW_HEIGHT + (SCRIPT_ROW_HEIGHT - 28.0) * 0.5;
+                let script_rect = Rect::from_xywh(
+                    rect.left,
+                    script_cy,
+                    rect.width() - 44.0,
+                    28.0,
+                );
+                let script_path = shape::rounded_rect_path(script_rect, CTRL_RADIUS);
+                let mut sbg = Paint::default();
+                sbg.set_color(theme.control_bg);
+                sbg.set_anti_alias(true);
+                canvas.draw_path(&script_path, &sbg);
+                let script_editing = edit.script.is_some_and(|(i, _)| i == *index);
+                let mut sborder = Paint::default();
+                sborder.set_color(if script_editing { theme.accent } else { theme.control_border });
+                sborder.set_anti_alias(true);
+                sborder.set_style(PaintStyle::Stroke);
+                sborder.set_stroke_width(if script_editing { 1.5 } else { 1.0 });
+                canvas.draw_path(&script_path, &sborder);
+                if let Some((_, te)) = edit.script.filter(|(i, _)| i == index) {
+                    draw_text_edit(
+                        canvas,
+                        script_rect,
+                        &fonts.font(12.0),
+                        theme.text,
+                        theme.accent,
+                        &te.text,
+                        Some(te),
+                    );
+                } else {
+                    let shown = if script.is_empty() { "输入指令,如 ipconfig /flushdns 喵" } else { script.as_str() };
+                    let mut sp = Paint::default();
+                    sp.set_color(if script.is_empty() { theme.text_dim } else { theme.text });
+                    sp.set_anti_alias(true);
+                    crate::render::text::draw_clipped(
+                        canvas,
+                        shown,
+                        Rect::from_xywh(script_rect.left + 8.0, script_rect.top, script_rect.width() - 12.0, script_rect.height()),
+                        &fonts.font(12.0),
+                        &sp,
+                    );
+                }
+                push_hit(script_rect, RowHit::CommandScript(*index));
+            }
         }
     }
 }

@@ -144,7 +144,8 @@ fn detail_panel(width: f32, height: f32) -> Rect {
 
 /// 绘制应用管理中心喵,返回布局结果喵
 ///
-/// `apps` 为**过滤后**的应用列表;`block_words` 为关键词过滤规则(屏蔽词)的展示串;
+/// `apps` 为**过滤后**的应用列表;`filter_shown` 为过滤框的非编辑态展示文本;
+/// `block_words` 为关键词过滤规则(屏蔽词)的展示串;
 /// `icons` 回调取已缓存图标(不触发提取)喵。
 #[allow(clippy::too_many_arguments)]
 pub fn paint_app_manager(
@@ -157,6 +158,7 @@ pub fn paint_app_manager(
     grid: bool,
     scroll: f32,
     edits: ManagerEdits,
+    filter_shown: &str,
     block_words: &[String],
     icons: &mut dyn FnMut(&AppInfo) -> Option<Image>,
     width: f32,
@@ -183,7 +185,7 @@ pub fn paint_app_manager(
     paint_titlebar(canvas, theme, fonts, total, apps.len(), width, &mut hits);
 
     // 工具栏: 过滤框 + 排版切换 + 重新扫描 + 拖入提示喵
-    paint_toolbar(canvas, theme, fonts, grid, edits, width, &mut hits);
+    paint_toolbar(canvas, theme, fonts, grid, edits, filter_shown, width, &mut hits);
 
     // 列表区(可滚动,底部预留屏蔽词横条)喵
     let mut panel = list_panel(width, height);
@@ -248,20 +250,31 @@ fn paint_close(canvas: &Canvas, theme: &SettingsTheme, width: f32, hits: &mut Ve
 }
 
 /// 工具栏: 过滤框 + 排版切换 + 重新扫描 + 拖入提示喵
+#[allow(clippy::too_many_arguments)]
 fn paint_toolbar(
     canvas: &Canvas,
     theme: &SettingsTheme,
     fonts: &FontCache,
     grid: bool,
     edits: ManagerEdits,
+    filter_shown: &str,
     width: f32,
     hits: &mut Vec<(Rect, ManagerHit)>,
 ) {
     let y = TITLEBAR_H + 8.0;
-    // 过滤框喵
+    // 过滤框喵(非编辑态显示已提交的过滤词,点击别处不会丢喵)
     let filter_rect = Rect::from_xywh(16.0, y, 220.0, 28.0);
     let editing = edits.filter.is_some();
-    draw_input_box(canvas, theme, filter_rect, editing, edits.filter, "输入关键词过滤喵…", fonts);
+    draw_input_box(
+        canvas,
+        theme,
+        filter_rect,
+        editing,
+        edits.filter,
+        "输入关键词过滤喵…",
+        Some(filter_shown),
+        fonts,
+    );
     hits.push((filter_rect, ManagerHit::FilterInput));
 
     // 排版切换按钮喵
@@ -317,7 +330,7 @@ fn paint_block_bar(
 
     // 添加输入框喵
     let input_rect = Rect::from_xywh(bar.left + 2.0, bar.top + 26.0, 150.0, 26.0);
-    draw_input_box(canvas, theme, input_rect, edits.block.is_some(), edits.block, "回车添加屏蔽词喵", fonts);
+    draw_input_box(canvas, theme, input_rect, edits.block.is_some(), edits.block, "回车添加屏蔽词喵", None, fonts);
     hits.push((input_rect, ManagerHit::Block(BlockPart::Input)));
 
     // 规则芯片流式排列喵
@@ -700,7 +713,7 @@ fn paint_detail(
     // 标签区: 添加输入框 + 芯片流式排列喵
     let tag_rect = Rect::from_xywh(panel.left + pad + 44.0, y + 6.0, inner_w - 44.0, 26.0);
     let editing = edits.tag.is_some();
-    draw_input_box(canvas, theme, tag_rect, editing, edits.tag, "输入标签回车添加喵", fonts);
+    draw_input_box(canvas, theme, tag_rect, editing, edits.tag, "输入标签回车添加喵", None, fonts);
     let mut lp = Paint::default();
     lp.set_color(theme.text);
     lp.set_anti_alias(true);
@@ -785,26 +798,17 @@ fn paint_field(
     lp.set_anti_alias(true);
     text::draw_clipped(canvas, label, Rect::from_xywh(x, y + 4.0, 40.0, 24.0), &fonts.font(12.0), &lp);
     let box_rect = Rect::from_xywh(x + 44.0, y, width - 44.0, 28.0);
-    draw_input_box(canvas, theme, box_rect, edit.is_some(), edit, "", fonts);
-    if edit.is_none() {
-        // 静态展示当前值(空值显示占位)喵
-        let shown = if value.is_empty() { "(空)" } else { value };
-        let mut vp = Paint::default();
-        vp.set_color(if value.is_empty() { theme.disabled } else { theme.text });
-        vp.set_anti_alias(true);
-        text::draw_clipped(
-            canvas,
-            shown,
-            Rect::from_xywh(box_rect.left + 8.0, box_rect.top, box_rect.width() - 12.0, box_rect.height()),
-            &fonts.font(11.5),
-            &vp,
-        );
-    }
+    // 非编辑态静态展示当前值,空值落占位喵
+    let shown = if value.is_empty() { "(空)" } else { value };
+    draw_input_box(canvas, theme, box_rect, edit.is_some(), edit, shown, Some(value), fonts);
     hits.push((box_rect, ManagerHit::DetailInput(field)));
     y + 34.0
 }
 
-/// 通用输入框底喵(底 + 边框 + 草稿文本/占位文案)喵
+/// 通用输入框底喵(底 + 边框 + 草稿文本/静态值/占位文案)喵
+///
+/// 非编辑态优先显示 `static_value`(正常文字色),空了才落 placeholder(暗色)喵。
+#[allow(clippy::too_many_arguments)]
 fn draw_input_box(
     canvas: &Canvas,
     theme: &SettingsTheme,
@@ -812,6 +816,7 @@ fn draw_input_box(
     editing: bool,
     edit: Option<&TextEdit>,
     placeholder: &str,
+    static_value: Option<&str>,
     fonts: &FontCache,
 ) {
     let path = shape::rounded_rect_path(rect, CTRL_RADIUS);
@@ -836,19 +841,26 @@ fn draw_input_box(
             &te.text,
             Some(te),
         ),
-        None if !placeholder.is_empty() => {
+        None => {
+            // 静态值优先(正常色),否则占位文案(暗色)喵
+            let (shown, color) = match static_value {
+                Some(v) if !v.is_empty() => (v, theme.text),
+                _ => (placeholder, theme.text_dim),
+            };
+            if shown.is_empty() {
+                return;
+            }
             let mut p = Paint::default();
-            p.set_color(theme.text_dim);
+            p.set_color(color);
             p.set_anti_alias(true);
             text::draw_clipped(
                 canvas,
-                placeholder,
+                shown,
                 Rect::from_xywh(rect.left + 8.0, rect.top, rect.width() - 12.0, rect.height()),
                 &fonts.font(11.5),
                 &p,
             );
         }
-        None => {}
     }
 }
 

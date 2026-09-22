@@ -20,12 +20,16 @@ use std::sync::{Arc, LazyLock, Mutex, Once, OnceLock};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::UI::WindowsAndMessaging::HICON;
 
-/// 注册热键的 id 喵
-const HOTKEY_ID: i32 = 0x4D4F; // "MO" 喵
+/// 注册热键的 id 喵(呼出搜索框)喵
+const HOTKEY_ID_LAUNCHER: i32 = 0x4D4F; // "MO" 喵
+/// 注册热键的 id 喵(后台扫描应用)喵
+const HOTKEY_ID_SCAN: i32 = 0x4D50; // "MP" 喵
 /// 热键线程 → 主窗口的自定义消息(WM_APP + 1)喵
 const WM_MEOW_HOTKEY: u32 = 0x8000 + 1;
-/// IPC 服务端 → 主窗口的自定义消息(WM_APP + 2)喵
-const WM_MEOW_IPC: u32 = 0x8000 + 2;
+/// 扫描热键线程 → 主窗口的自定义消息(WM_APP + 2)喵
+const WM_MEOW_SCAN: u32 = 0x8000 + 2;
+/// IPC 服务端 → 主窗口的自定义消息(WM_APP + 3)喵
+const WM_MEOW_IPC: u32 = 0x8000 + 3;
 /// IPC 命令队列喵(named-pipe 服务端线程投递,主线程在 wnd_proc 里取走)喵
 static IPC_QUEUE: Mutex<std::collections::VecDeque<super::IpcCommand>> =
     Mutex::new(std::collections::VecDeque::new());
@@ -94,8 +98,10 @@ struct TrayState {
 
 /// Windows 平台句柄喵
 pub struct Win32Platform {
-    /// 热键隐藏窗口句柄(usize 形式,保证 Send)喵
+    /// 呼出热键隐藏窗口句柄(usize 形式,保证 Send)喵
     hotkey_hwnd: Arc<Mutex<Option<usize>>>,
+    /// 扫描热键隐藏窗口句柄喵(与呼出热键各占一条线程,互不干扰)喵
+    scan_hotkey_hwnd: Arc<Mutex<Option<usize>>>,
 }
 
 impl Win32Platform {
@@ -103,6 +109,7 @@ impl Win32Platform {
         enable_dpi_awareness();
         Self {
             hotkey_hwnd: Arc::new(Mutex::new(None)),
+            scan_hotkey_hwnd: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -200,57 +207,62 @@ impl Win32Platform {
         execute_system_command_impl(command)
     }
 
+    /// 弹一条系统通知喵(委托 [`super::NotificationSink`] 特质的平台实现)喵
+    pub fn show_notification(&self, title: &str, body: &str) {
+        super::NotificationSink::show_notification(self, title, body);
+    }
+
+    /// 在指定 shell 里执行指令喵(委托 [`super::ShellRunner`] 特质的平台实现)喵
+    ///
+    /// 阻塞调用,务必放在后台线程喵。
+    pub fn run_shell(&self, shell: super::ShellKind, command: &str) -> Result<String, String> {
+        super::ShellRunner::run_shell(self, shell, command)
+    }
+
     pub fn register_global_hotkey(
         &self,
         modifiers: &str,
         key: &str,
         target: PlatformWindow,
     ) -> bool {
-        let (mods, vk) = match parse_hotkey(modifiers, key) {
-            Some(v) => v,
-            None => {
-                log::warn!("无法解析热键: modifiers={modifiers:?} key={key:?}");
-                return false;
-            }
-        };
+        register_hotkey_impl(
+            HOTKEY_ID_LAUNCHER,
+            WM_MEOW_HOTKEY,
+            true,
+            "呼出",
+            modifiers,
+            key,
+            target,
+            &self.hotkey_hwnd,
+        )
+    }
 
-        // 先取消旧的,再注册新的喵
-        self.unregister_global_hotkey();
-
-        let target_hwnd = target.hwnd();
-        let hwnd_holder = self.hotkey_hwnd.clone();
-        let spawned = std::thread::Builder::new()
-            .name("meow-hotkey".into())
-            .spawn(move || {
-                hotkey_message_loop(mods, vk, target_hwnd, hwnd_holder);
-            });
-
-        match spawned {
-            Ok(_) => {
-                log::info!("全局热键注册成功: {modifiers}+{key} 喵");
-                true
-            }
-            Err(e) => {
-                log::error!("热键线程创建失败: {e}");
-                false
-            }
-        }
+    /// 注册「扫描应用」全局热键喵(触发后台扫描,不抢前台不呼出岛)喵
+    pub fn register_scan_hotkey(
+        &self,
+        modifiers: &str,
+        key: &str,
+        target: PlatformWindow,
+    ) -> bool {
+        register_hotkey_impl(
+            HOTKEY_ID_SCAN,
+            WM_MEOW_SCAN,
+            false,
+            "扫描",
+            modifiers,
+            key,
+            target,
+            &self.scan_hotkey_hwnd,
+        )
     }
 
     pub fn unregister_global_hotkey(&self) {
-        let hwnd = self.hotkey_hwnd.lock().unwrap().take();
-        if let Some(hwnd) = hwnd {
-            log::debug!("取消全局热键喵");
-            unsafe {
-                // 发 WM_CLOSE 让消息循环优雅退出喵
-                windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
-                    hwnd as HWND,
-                    windows_sys::Win32::UI::WindowsAndMessaging::WM_CLOSE,
-                    0,
-                    0,
-                );
-            }
-        }
+        unregister_hotkey_impl(&self.hotkey_hwnd, "呼出");
+    }
+
+    /// 取消「扫描应用」全局热键喵
+    pub fn unregister_scan_hotkey(&self) {
+        unregister_hotkey_impl(&self.scan_hotkey_hwnd, "扫描");
     }
 
     pub fn set_auto_start(&self, enabled: bool) -> bool {
@@ -709,6 +721,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         // 热键触发(热键线程 PostMessage 过来)喵
         WM_MEOW_HOTKEY => {
             with_window_handler(hwnd, |h| h.on_event(WindowEvent::Hotkey));
+            0
+        }
+        // 扫描热键触发(后台扫描应用,不呼出岛)喵
+        WM_MEOW_SCAN => {
+            with_window_handler(hwnd, |h| h.on_event(WindowEvent::ScanHotkey));
             0
         }
         // IPC 命令到达(named-pipe 服务端线程投递,逐条派发给启动器)喵
@@ -2118,8 +2135,74 @@ fn parse_hotkey(modifiers: &str, key: &str) -> Option<(u32, u32)> {
     Some((mods, vk))
 }
 
+/// 注册一路全局热键的通用实现喵(id 与转发消息参数化,呼出/扫描各占一路)喵
+///
+/// `foreground` 决定触发时要不要抢前台 —— 呼出热键要(岛要接收输入),
+/// 扫描热键不要(后台默默干活,抢前台反而打断用户)喵。
+#[allow(clippy::too_many_arguments)]
+fn register_hotkey_impl(
+    hotkey_id: i32,
+    forward_msg: u32,
+    foreground: bool,
+    label: &str,
+    modifiers: &str,
+    key: &str,
+    target: PlatformWindow,
+    hwnd_holder: &Arc<Mutex<Option<usize>>>,
+) -> bool {
+    let (mods, vk) = match parse_hotkey(modifiers, key) {
+        Some(v) => v,
+        None => {
+            log::warn!("无法解析热键: modifiers={modifiers:?} key={key:?}");
+            return false;
+        }
+    };
+
+    // 先取消旧的,再注册新的喵
+    unregister_hotkey_impl(hwnd_holder, label);
+
+    let target_hwnd = target.hwnd();
+    let hwnd_holder = hwnd_holder.clone();
+    let spawned = std::thread::Builder::new()
+        .name(format!("meow-hotkey-{label}"))
+        .spawn(move || {
+            hotkey_message_loop(hotkey_id, forward_msg, foreground, mods, vk, target_hwnd, hwnd_holder);
+        });
+
+    match spawned {
+        Ok(_) => {
+            log::info!("{label}热键注册成功: {modifiers}+{key} 喵");
+            true
+        }
+        Err(e) => {
+            log::error!("{label}热键线程创建失败: {e}");
+            false
+        }
+    }
+}
+
+/// 取消一路全局热键的通用实现喵(发 WM_CLOSE 让消息循环优雅退出)喵
+fn unregister_hotkey_impl(hwnd_holder: &Mutex<Option<usize>>, label: &str) {
+    let hwnd = hwnd_holder.lock().unwrap().take();
+    if let Some(hwnd) = hwnd {
+        log::debug!("取消{label}热键喵");
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
+                hwnd as HWND,
+                windows_sys::Win32::UI::WindowsAndMessaging::WM_CLOSE,
+                0,
+                0,
+            );
+        }
+    }
+}
+
 /// 隐藏窗口消息循环: 注册热键、触发时激活目标窗口并派发事件喵
+#[allow(clippy::too_many_arguments)]
 fn hotkey_message_loop(
+    hotkey_id: i32,
+    forward_msg: u32,
+    foreground: bool,
     mods: u32,
     vk: u32,
     target_hwnd: usize,
@@ -2173,7 +2256,7 @@ fn hotkey_message_loop(
     // 旧热键线程可能还没释放同组合,轻微重试(上限 ~200ms),避免「改完不生效」喵
     let mut registered = false;
     for _ in 0..20 {
-        if unsafe { RegisterHotKey(hwnd, HOTKEY_ID, mods, vk) } != 0 {
+        if unsafe { RegisterHotKey(hwnd, hotkey_id, mods, vk) } != 0 {
             registered = true;
             break;
         }
@@ -2190,12 +2273,15 @@ fn hotkey_message_loop(
 
     let mut msg: MSG = unsafe { zeroed() };
     while unsafe { GetMessageW(&mut msg, null_mut(), 0, 0) } > 0 {
-        if msg.message == WM_HOTKEY && msg.wParam as i32 == HOTKEY_ID {
+        if msg.message == WM_HOTKEY && msg.wParam as i32 == hotkey_id {
             log::debug!("收到全局热键喵!");
-            // 热键按下即系统认定的「最后一次输入事件」,此刻本线程握有前台特权,
-            // 抢前台就得趁现在 —— 错过这个窗口期,主线程只能走前台锁自救喵。
-            unsafe { SetForegroundWindow(target_hwnd as HWND) };
-            unsafe { PostMessageW(target_hwnd as HWND, WM_MEOW_HOTKEY, 0, 0) };
+            // 呼出热键要抢前台: 热键按下即系统认定的「最后一次输入事件」,
+            // 此刻本线程握有前台特权,错过这个窗口期主线程只能走前台锁自救喵。
+            // 扫描热键是后台动作,不打断用户手头的事喵。
+            if foreground {
+                unsafe { SetForegroundWindow(target_hwnd as HWND) };
+            }
+            unsafe { PostMessageW(target_hwnd as HWND, forward_msg, 0, 0) };
         }
         unsafe {
             TranslateMessage(&msg);
@@ -2203,7 +2289,7 @@ fn hotkey_message_loop(
         }
     }
     unsafe {
-        UnregisterHotKey(hwnd, HOTKEY_ID);
+        UnregisterHotKey(hwnd, hotkey_id);
         DestroyWindow(hwnd);
     }
     log::debug!("热键消息循环退出喵");
@@ -2467,6 +2553,181 @@ fn execute_system_command_impl(command: SystemCommandKind) -> bool {
         SystemCommandKind::Shutdown | SystemCommandKind::Restart => {
             exit_windows_impl(matches!(command, SystemCommandKind::Restart))
         }
+        // 自定义指令不走这里: 由业务层经 ShellRunner 异步执行喵
+        SystemCommandKind::Custom => {
+            log::warn!("Custom 指令应由 ShellRunner 执行,而非内置系统命令喵");
+            false
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shell 指令执行喵(ShellRunner 特质的 Windows 实现)
+// ---------------------------------------------------------------------------
+
+/// 指令输出的展示上限喵(通知气泡塞不下太长的东西喵)
+const SHELL_OUTPUT_LIMIT: usize = 400;
+
+impl super::ShellRunner for Win32Platform {
+    fn run_shell(&self, shell: super::ShellKind, command: &str) -> Result<String, String> {
+        run_shell_command_impl(shell, command)
+    }
+}
+
+/// 在指定 shell 中执行指令并捕获合并输出喵
+///
+/// 统一隐藏窗口(CREATE_NO_WINDOW),捕获 stdout+stderr,
+/// 输出按控制台编码解码(UTF-8 优先,回落系统代码页)并截断到展示上限喵。
+fn run_shell_command_impl(shell: super::ShellKind, command: &str) -> Result<String, String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    /// CREATE_NO_WINDOW: 后台执行不闪黑窗喵
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    if command.trim().is_empty() {
+        return Err("指令为空喵".into());
+    }
+
+    let mut cmd = match shell {
+        super::ShellKind::Powershell => {
+            let mut c = Command::new("powershell.exe");
+            c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command]);
+            c
+        }
+        super::ShellKind::Cmd => {
+            let mut c = Command::new("cmd.exe");
+            c.args(["/C", command]);
+            c
+        }
+    };
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    log::info!("执行{}指令: {command} 喵", shell.label());
+    let output = cmd.output().map_err(|e| format!("指令启动失败: {e}"))?;
+
+    // stdout + stderr 合并,按控制台编码解码喵
+    // (中文系统的 ipconfig/ping 等经典工具输出 GBK,硬按 UTF-8 解会满屏替换符喵)
+    let mut text = decode_console_output(&output.stdout);
+    text.push_str(&decode_console_output(&output.stderr));
+    let text = text.trim().to_string();
+
+    if output.status.success() {
+        Ok(truncate_output(&text))
+    } else {
+        let code = output.status.code().unwrap_or(-1);
+        Err(if text.is_empty() {
+            format!("指令退出码 {code}")
+        } else {
+            truncate_output(&text)
+        })
+    }
+}
+
+/// 按控制台编码把子进程输出字节解成文本喵(UTF-8 优先,回落系统 OEM 代码页)喵
+///
+/// 控制台程序的输出编码取决于程序本身与系统区域设置:
+/// * 现代程序/PS 脚本可能直接输出 UTF-8 → 严格校验通过,原样直通喵
+///   (中文系统的经典工具 ipconfig/ping 等输出 GBK(OEM 代码页 936) →
+///   UTF-8 校验必然失败,回落用 `MultiByteToWideChar(CP_OEMCP)` 转成 UTF-16 再进 String喵)
+///
+/// 两条路都失败时才退回 UTF-8 宽松替换,尽力不产生乱码喵。
+pub fn decode_console_output(bytes: &[u8]) -> String {
+    use windows_sys::Win32::Globalization::{CP_OEMCP, MultiByteToWideChar};
+
+    if bytes.is_empty() {
+        return String::new();
+    }
+    // 1. 合法 UTF-8(含纯 ASCII)直接用喵
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+    // 2. 按系统 OEM 代码页(中文系统 = 936/GBK)转宽字符喵
+    unsafe {
+        let len = MultiByteToWideChar(
+            CP_OEMCP,
+            0,
+            bytes.as_ptr(),
+            bytes.len() as i32,
+            null_mut(),
+            0,
+        );
+        if len > 0 {
+            let mut wide = vec![0u16; len as usize];
+            let written = MultiByteToWideChar(
+                CP_OEMCP,
+                0,
+                bytes.as_ptr(),
+                bytes.len() as i32,
+                wide.as_mut_ptr(),
+                len,
+            );
+            if written > 0 {
+                wide.truncate(written as usize);
+                return String::from_utf16_lossy(&wide);
+            }
+        }
+    }
+    // 3. 兜底: UTF-8 宽松替换(非法字节变 U+FFFD,至少不 panic)喵
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// 截断输出到展示上限喵(超长加省略号尾巴)喵
+fn truncate_output(text: &str) -> String {
+    if text.chars().count() <= SHELL_OUTPUT_LIMIT {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(SHELL_OUTPUT_LIMIT).collect();
+    format!("{head}…")
+}
+
+// ---------------------------------------------------------------------------
+// 系统通知喵(NotificationSink 特质的 Windows 实现)
+// ---------------------------------------------------------------------------
+
+impl super::NotificationSink for Win32Platform {
+    fn show_notification(&self, title: &str, body: &str) {
+        show_notification_impl(title, body);
+    }
+}
+
+/// 托盘气泡通知喵(复用常驻托盘图标,零额外窗口零额外依赖)喵
+///
+/// 跨线程调用 Shell_NotifyIconW 是安全的(内部投递到托盘所有者线程)喵。
+fn show_notification_impl(title: &str, body: &str) {
+    /// 通知信息标志: 带信息图标喵
+    const NIIF_INFO: u32 = 0x0000_0001;
+
+    // 气泡文本上限: 标题 63 / 正文 255 字符(UTF-16 单元)喵
+    let mut title_wide: Vec<u16> = title.encode_utf16().collect();
+    title_wide.truncate(63);
+    title_wide.push(0);
+    let mut body_wide: Vec<u16> = body.encode_utf16().collect();
+    body_wide.truncate(255);
+    body_wide.push(0);
+
+    let sent = TRAY_STATE.with(|s| {
+        let tray = s.borrow();
+        let Some(state) = tray.as_ref() else {
+            return false;
+        };
+        unsafe {
+            let mut nid: NOTIFYICONDATAW = zeroed();
+            nid.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
+            nid.hWnd = state.hwnd as HWND;
+            nid.uID = 1;
+            nid.uFlags = NIF_INFO;
+            nid.dwInfoFlags = NIIF_INFO;
+            nid.szInfoTitle[..title_wide.len()].copy_from_slice(&title_wide);
+            nid.szInfo[..body_wide.len()].copy_from_slice(&body_wide);
+            Shell_NotifyIconW(NIM_MODIFY, &nid) != 0
+        }
+    });
+    if sent {
+        log::debug!("系统通知已弹出: {title} 喵");
+    } else {
+        // 托盘不在(极少见)时退化为日志,不打断业务喵
+        log::info!("通知(托盘不可用,降级日志): {title} — {body} 喵");
     }
 }
 
@@ -2630,7 +2891,7 @@ fn launch_args_impl(path: &str, args: &str) -> bool {
 // 常量与类型引入喵
 // ---------------------------------------------------------------------------
 
-use windows_sys::Win32::UI::Shell::{NOTIFYICONDATAW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, Shell_NotifyIconW};
+use windows_sys::Win32::UI::Shell::{NOTIFYICONDATAW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, Shell_NotifyIconW};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };

@@ -11,6 +11,7 @@ use crate::animation::island::{EasingName, MotionMode};
 use crate::app::config::{
     AppConfig, AppLayout, ElevateModifier, RenderBackend, SearchMode, ThemePreset, WebEngine,
 };
+use crate::platform::ShellKind;
 
 use crate::render::settings::RowId;
 
@@ -293,6 +294,16 @@ pub fn data_rows() -> Vec<RowDesc> {
                 })
             },
         },
+        RowDesc {
+            id: RowId::ScanHotkeyEnabled,
+            label: "启用扫描热键",
+            page: PAGE_GENERAL,
+            group: "热键",
+            index: 0,
+            kind: RowKind::Switch,
+            get: |c, _| RowValue::Bool(c.scan_hotkey.enabled),
+            set: |c, _, v| write_bool(v, c.scan_hotkey.enabled, |b| c.scan_hotkey.enabled = b),
+        },
         // ---- 常规 · 显示 ----
         RowDesc {
             id: RowId::ShowRecent,
@@ -399,6 +410,19 @@ pub fn data_rows() -> Vec<RowDesc> {
             },
             get: |c, _| idx_of(&WebEngine::ALL, c.search.web_engine),
             set: |c, _, v| write_idx(&WebEngine::ALL, v, c.search.web_engine, |t| c.search.web_engine = t),
+        },
+        // ---- 常规 · 指令模块(shell 选择,与指令卡片同组显示)----
+        RowDesc {
+            id: RowId::ShellKind,
+            label: "指令执行 Shell",
+            page: PAGE_GENERAL,
+            group: "指令模块",
+            index: 0,
+            kind: RowKind::Choice {
+                options: &["PowerShell", "Cmd"],
+            },
+            get: |c, _| idx_of(&ShellKind::ALL, c.search.shell),
+            set: |c, _, v| write_idx(&ShellKind::ALL, v, c.search.shell, |t| c.search.shell = t),
         },
         // ---- 常规 · 系统 ----
         RowDesc {

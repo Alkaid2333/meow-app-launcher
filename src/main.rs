@@ -85,15 +85,24 @@ fn main() {
     // 3. 创建系统托盘喵
     let tray = Tray::spawn(platform.clone(), state.clone(), commands.clone());
 
-    // 4. 注册全局热键喵
+    // 4. 注册全局热键喵(呼出 + 扫描两路,互不干扰)喵
     let hotkey = state.borrow().config.hotkey.clone();
     if hotkey.enabled {
         let ok = platform.register_global_hotkey(&hotkey.modifiers, &hotkey.key, launcher_window);
         if !ok {
-            log::warn!("全局热键注册失败喵~");
+            log::warn!("呼出全局热键注册失败喵~");
         }
     } else {
-        log::info!("全局热键已禁用喵~");
+        log::info!("呼出全局热键已禁用喵~");
+    }
+    let scan = state.borrow().config.scan_hotkey.clone();
+    if scan.enabled {
+        let ok = platform.register_scan_hotkey(&scan.modifiers, &scan.key, launcher_window);
+        if !ok {
+            log::warn!("扫描全局热键注册失败喵~");
+        }
+    } else {
+        log::info!("扫描全局热键已禁用喵~");
     }
 
     // 5. 启动 named-pipe IPC 服务端(`meowal show|hide|toggle|query` 的联动入口)喵
@@ -105,6 +114,7 @@ fn main() {
     // 7. 清理资源喵
     log::info!("应用退出,清理资源喵~");
     platform.unregister_global_hotkey();
+    platform.unregister_scan_hotkey();
     platform.destroy_tray(&tray);
     platform.destroy_window(&launcher_window);
     platform.destroy_window(&settings_window);

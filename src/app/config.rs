@@ -3,7 +3,7 @@
 //! 配置文件生成在 `./.datas/config.json` 喵,首次启动自动创建默认配置喵。
 
 use crate::animation::IslandConfig;
-use crate::platform::SystemCommandKind;
+use crate::platform::{ShellKind, SystemCommandKind};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -360,6 +360,9 @@ impl WebEngine {
 }
 
 /// 系统指令条目喵: 一条命令 + 任意多个触发别名(中英文/拼音缩写随配)喵
+///
+/// `kind` 为 [`SystemCommandKind::Custom`] 时执行 `script`(交由平台 shell)喵,
+/// 其余档位走内置系统命令;旧配置缺 `script` 字段时回填空串喵。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandEntry {
     /// 触发别名喵(任一别名命中即出结果)喵
@@ -367,19 +370,34 @@ pub struct CommandEntry {
     pub aliases: Vec<String>,
     /// 对应的系统命令喵
     pub kind: SystemCommandKind,
+    /// 自定义指令文本喵(仅 kind = Custom 时使用)喵
+    #[serde(default)]
+    pub script: String,
+}
+
+impl CommandEntry {
+    /// 造一条内置系统指令喵
+    pub fn builtin(aliases: Vec<String>, kind: SystemCommandKind) -> Self {
+        Self { aliases, kind, script: String::new() }
+    }
+
+    /// 造一条自定义指令喵
+    pub fn custom(aliases: Vec<String>, script: impl Into<String>) -> Self {
+        Self { aliases, kind: SystemCommandKind::Custom, script: script.into() }
+    }
 }
 
 /// 默认指令表喵(中英双语,老配置缺字段时回填)喵
 fn default_commands() -> Vec<CommandEntry> {
     use crate::platform::SystemCommandKind as K;
     vec![
-        CommandEntry { aliases: vec!["锁屏".into(), "lock".into()], kind: K::Lock },
-        CommandEntry { aliases: vec!["睡眠".into(), "sleep".into()], kind: K::Sleep },
-        CommandEntry { aliases: vec!["关机".into(), "shutdown".into()], kind: K::Shutdown },
-        CommandEntry {
-            aliases: vec!["重启".into(), "restart".into(), "reboot".into()],
-            kind: K::Restart,
-        },
+        CommandEntry::builtin(vec!["锁屏".into(), "lock".into()], K::Lock),
+        CommandEntry::builtin(vec!["睡眠".into(), "sleep".into()], K::Sleep),
+        CommandEntry::builtin(vec!["关机".into(), "shutdown".into()], K::Shutdown),
+        CommandEntry::builtin(
+            vec!["重启".into(), "restart".into(), "reboot".into()],
+            K::Restart,
+        ),
     ]
 }
 
@@ -400,6 +418,9 @@ pub struct SearchConfig {
     /// 指令模块喵(系统命令别名表,可自由增删改)喵
     #[serde(default = "default_commands")]
     pub commands: Vec<CommandEntry>,
+    /// 自定义指令的执行 shell 喵(旧配置缺字段时回填默认)喵
+    #[serde(default)]
+    pub shell: ShellKind,
 }
 
 /// 默认过滤规则: 排除「卸载 / uninstall」类启动项喵
@@ -424,6 +445,7 @@ impl Default for SearchConfig {
             web_engine: WebEngine::default(),
             web_browser: String::new(),
             commands: default_commands(),
+            shell: ShellKind::default(),
         }
     }
 }
@@ -433,6 +455,9 @@ impl Default for SearchConfig {
 pub struct AppConfig {
     /// 全局热键喵
     pub hotkey: HotkeyConfig,
+    /// 扫描应用热键喵(后台扫描,不呼出搜索框;旧配置缺字段时回填默认)喵
+    #[serde(default = "default_scan_hotkey")]
+    pub scan_hotkey: HotkeyConfig,
     /// 提权启动修饰键喵(按住它启动 = 以管理员身份运行;默认 Shift)喵
     #[serde(default)]
     pub elevate_modifier: ElevateModifier,
@@ -461,11 +486,21 @@ fn default_true() -> bool {
     true
 }
 
+/// 扫描热键默认值喵(Ctrl+Alt+S,S = Scan 喵)
+fn default_scan_hotkey() -> HotkeyConfig {
+    HotkeyConfig {
+        enabled: true,
+        modifiers: "ctrl+alt".into(),
+        key: "s".into(),
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         let island = IslandConfig::default();
         Self {
             hotkey: HotkeyConfig::default(),
+            scan_hotkey: default_scan_hotkey(),
             elevate_modifier: ElevateModifier::default(),
             window: WindowConfig::default(),
             theme: ThemeConfig::default(),

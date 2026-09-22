@@ -70,6 +70,10 @@ impl Tray {
                 enabled: true,
             },
             TrayMenuItem {
+                label: "扫描应用".into(),
+                enabled: true,
+            },
+            TrayMenuItem {
                 label: "设置".into(),
                 enabled: true,
             },
@@ -101,10 +105,11 @@ impl TrayHandler for Tray {
                 log::info!("托盘菜单项 {i} 喵");
                 let cmd = match i {
                     0 => Some(Command::ToggleLauncher),
-                    1 => Some(Command::OpenSettings),
-                    2 => Some(Command::OpenAppManager),
-                    3 => Some(Command::Restart),
-                    4 => Some(Command::Quit),
+                    1 => Some(Command::Rescan),
+                    2 => Some(Command::OpenSettings),
+                    3 => Some(Command::OpenAppManager),
+                    4 => Some(Command::Restart),
+                    5 => Some(Command::Quit),
                     _ => None,
                 };
                 if let Some(cmd) = cmd {

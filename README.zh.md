@@ -11,7 +11,7 @@
 
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4?logo=windows&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
 [![Rust](https://img.shields.io/badge/rust-1.97%2B%20%C2%B7%20edition%202024-dea584?logo=rust&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
-[![Tests](https://img.shields.io/badge/tests-111%20passing-3fb950?logo=githubactions&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
+[![Tests](https://img.shields.io/badge/tests-125%20passing-3fb950?logo=githubactions&logoColor=white)](https://github.com/Alkaid2333/meow-app-launcher)
 [![License](https://img.shields.io/badge/license-MIT-007ec6)](LICENSE)
 
 **[English](README.md) · [简体中文](README.zh.md)**
@@ -44,6 +44,7 @@
 | 🧮 **计算器** | 直接输入算式（支持 `+ - * / % ^` 与括号、一元负号），shunting-yard 求值，回车复制结果喵。 |
 | 🌐 **Web 搜索** | 任意关键词一键跳转百度 / 必应 / 搜狗 / 谷歌 / DuckDuckGo 喵。 |
 | 🖥️ **系统指令** | 锁屏、睡眠、关机、重启 —— 别名表**完全可配置**，`熄屏`、`lock`、`睡眠` 可以同时生效喵。 |
+| ⌨️ **自定义指令** | 指令卡片选「自定义」档写一条脚本，或直接输入 `> ` 开头的查询进入指令模式；由配置的 shell（PowerShell / Cmd）**后台执行**，结果走系统通知反馈，长任务不卡 UI、不闪黑窗喵。 |
 
 ### 视觉与交互
 
@@ -61,6 +62,10 @@
 ### 桌面集成
 
 - **系统托盘** —— 图标直接取自应用自身的 `.ico` 资源；资源管理器重启后自动重建喵。
+- **扫描双向同步** —— 开始菜单扫描支持**增量 + 减量**：新装的软件自动入库，卸载（或快捷方式
+  被删）的软件在下一次扫描时连同图标快照一起移除；手动注册的应用不受影响，
+  命中屏蔽词的条目也不会被误删喵。可配置第二路全局热键（默认 `Ctrl+Alt+S`）或托盘菜单触发，
+  扫描完成后经**系统通知**（`NotificationSink` 特质，Windows 托盘气泡实现）汇报增减结果喵。
 - **子进程永远拿到最新环境** —— 岛是常驻进程，子进程本会继承它启动那一刻的环境块快照，
   于是你改完系统变量后从它打开 Terminal 仍是旧的 `PATH`。现在会重读系统键与用户键、
   按 Windows 的规矩合并（用户 `PATH` 接在系统 `PATH` 之后、会话级的 `TEMP`/`TMP` 不越界）、
@@ -119,7 +124,7 @@ SKIA_BINARIES_URL="file://X:/path/to/skia-binaries-<key>.tar.gz" cargo build --r
 ```bash
 cargo run                      # debug 构建，带控制台
 MEOWAL_VERBOSE=1 cargo run     # 顺带打开 debug 级日志
-cargo test                     # 111 个测试
+cargo test                     # 125 个测试
 ```
 
 ## 🕹️ 使用
@@ -180,9 +185,9 @@ src/
 │   ├── icon.rs        # 统一图标层(IconSource)喵
 │   └── svg.rs         # 轻量内嵌 SVG 渲染器喵
 ├── platform/
-│   ├── mod.rs         # Platform trait —— 唯一的平台边界喵
+│   ├── mod.rs         # Platform trait —— 唯一的平台边界(含 ShellRunner / NotificationSink 特质)喵
 │   ├── env.rs         # 环境变量合并 / 展开 / 差量(纯逻辑)喵
-│   └── win32.rs       # Win32 实现喵
+│   └── win32.rs       # Win32 实现(含 shell 执行与托盘气泡通知)喵
 ├── animation/
 │   ├── mod.rs         # 启动器弹簧喵
 │   ├── springs.rs     # 弹簧物理(纯数学,零依赖)喵
@@ -202,7 +207,7 @@ src/
     └── logger.rs      # logforth 布局、彩色、分离落盘喵
 ```
 
-`tests/` 下有 17 个测试文件、共 111 个测试，覆盖弹簧物理、模糊匹配、搜索、布局、圆角形状、
+`tests/` 下有 19 个测试文件、共 125 个测试，覆盖弹簧物理、模糊匹配、搜索、布局、圆角形状、
 岛体状态机、SVG 渲染、文本编辑、CLI 参数解析、环境变量两级合并与展开、资源完整性与 GPU 冒烟喵。
 
 ### 设计纪律
@@ -228,6 +233,8 @@ src/
 | `hotkey.enabled` | `true` | 是否启用全局热键喵 |
 | `hotkey.modifiers` | `"ctrl+alt"` | `ctrl` / `alt` / `shift` / `win`，可用 `+` 组合喵 |
 | `hotkey.key` | `"space"` | 触发键喵 |
+| `scan_hotkey.enabled` | `true` | 是否启用扫描热键(后台扫描应用,不呼出搜索框)喵 |
+| `scan_hotkey.modifiers` / `key` | `"ctrl+alt"` / `"s"` | 扫描热键组合喵 |
 | `elevate_modifier` | `"shift"` | 按住它以管理员身份启动：`disabled` / `shift` / `ctrl` / `alt` / `win` 喵 |
 | `window.layout` | `"row"` | `row` 行 / `grid` 网格喵 |
 | `window.icon_size` | `36.0` | 图标尺寸(px)喵 |
@@ -240,7 +247,8 @@ src/
 | `search.filters` | `卸载`、`uninstall` | 命中关键词的启动项会被隐藏喵 |
 | `search.web_engine` | `"baidu"` | `baidu` / `bing` / `sogou` / `google` / `duckduckgo` 喵 |
 | `search.web_browser` | `""` | 空 = 系统默认；支持带引号的路径与 `%1` 占位符喵 |
-| `search.commands` | 4 条 | 指令别名表（`aliases` + `kind`），可自由增删改喵 |
+| `search.commands` | 4 条 | 指令表（`aliases` + `kind` + `script`），`kind` 可为 `custom`（自定义 shell 指令），可自由增删改喵 |
+| `search.shell` | `"powershell"` | 自定义指令的执行 shell：`powershell` / `cmd` 喵 |
 | `island.*` | 见下表 | 岛体几何与动画喵 |
 | `auto_start` | `false` | 写 Windows `Run` 键实现开机自启喵 |
 | `render_backend` | `"cpu"` | `cpu` / `gpu`，GPU 失败自动回退 CPU 喵 |
@@ -299,7 +307,7 @@ src/
 cargo test
 ```
 
-共 111 个测试喵。核心测试套件不需要 GPU 或显示器（GPU 那条会降级成冒烟检查）喵。
+共 125 个测试喵。核心测试套件不需要 GPU 或显示器（GPU 那条会降级成冒烟检查）喵。
 
 ## 🗺️ 路线图
 

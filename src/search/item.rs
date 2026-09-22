@@ -18,6 +18,8 @@ pub enum Action {
     CopyText(String),
     /// 执行系统命令(仅内置预定义,不接受任意输入)喵
     SystemCommand(SystemCommandKind),
+    /// 执行自定义 shell 指令喵(交由配置的 shell 后台执行,结果走系统通知)喵
+    ShellCommand(String),
 }
 
 /// 条目图标喵

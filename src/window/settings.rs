@@ -91,14 +91,16 @@ pub struct SettingsWindow {
     filter_edit: Option<(usize, TextEdit)>,
     /// 正在编辑的指令别名行(下标 + 文本缓冲)喵
     command_edit: Option<(usize, TextEdit)>,
+    /// 正在编辑的自定义指令脚本行(下标 + 文本缓冲)喵
+    script_edit: Option<(usize, TextEdit)>,
     /// 正在编辑的自定义浏览器输入(文本缓冲)喵
     browser_edit: Option<TextEdit>,
     /// 正在拖选文本的输入框喵
     text_drag: Option<TextDrag>,
     /// 正在拖动的滚动条快照喵
     scroll_drag: Option<ScrollDrag>,
-    /// 是否正在录制全局热键喵
-    hotkey_capture: bool,
+    /// 正在录制热键的按钮行喵(None = 不在录制;区分呼出/扫描两路热键)喵
+    hotkey_capture: Option<RowId>,
     /// 窗口当前逻辑尺寸(可拖拽缩放)喵
     win_w: f32,
     /// 窗口当前逻辑高度喵
@@ -175,10 +177,11 @@ impl SettingsWindow {
             stepper_edit: None,
             filter_edit: None,
             command_edit: None,
+            script_edit: None,
             browser_edit: None,
             text_drag: None,
             scroll_drag: None,
-            hotkey_capture: false,
+            hotkey_capture: None,
             win_w: SETTINGS_WIDTH,
             win_h: SETTINGS_HEIGHT,
             win_pos: Some((x, y)),
@@ -295,6 +298,7 @@ impl SettingsWindow {
             stepper: self.stepper_edit.as_ref().map(|(id, te)| (*id, te)),
             filter: self.filter_edit.as_ref().map(|(i, te)| (*i, te)),
             command: self.command_edit.as_ref().map(|(i, te)| (*i, te)),
+            script: self.script_edit.as_ref().map(|(i, te)| (*i, te)),
             browser: self.browser_edit.as_ref(),
         };
         let layout = paint_settings(
@@ -359,6 +363,7 @@ impl SettingsWindow {
             Some((_, RowHit::StepperEdit(_)))
                 | Some((_, RowHit::FilterInput(_)))
                 | Some((_, RowHit::CommandAlias(_)))
+                | Some((_, RowHit::CommandScript(_)))
                 | Some((_, RowHit::Input(_)))
         );
         if !on_input {
@@ -379,6 +384,7 @@ impl SettingsWindow {
                 RowHit::StepperEdit(id) => self.click_stepper_box(rect, id, lx),
                 RowHit::FilterInput(i) => self.click_filter_box(rect, i, lx),
                 RowHit::CommandAlias(i) => self.click_command_box(rect, i, lx),
+                RowHit::CommandScript(i) => self.click_script_box(rect, i, lx),
                 RowHit::Input(RowId::WebBrowser) => self.click_browser_box(rect, lx),
                 RowHit::ScrollThumb => self.begin_scroll_drag(ly),
                 _ => self.apply_hit(hit),
@@ -420,6 +426,7 @@ impl SettingsWindow {
         }
         self.filter_edit = None;
         self.command_edit = None;
+        self.script_edit = None;
         self.browser_edit = None;
         self.text_drag = Some(TextDrag { rect: box_rect });
         log::debug!("数值框聚焦: {id:?} 喵");
@@ -451,6 +458,7 @@ impl SettingsWindow {
         }
         self.stepper_edit = None;
         self.command_edit = None;
+        self.script_edit = None;
         self.browser_edit = None;
         self.text_drag = Some(TextDrag { rect: box_rect });
         log::debug!("过滤关键词框聚焦: 规则 {index} 喵");
@@ -482,9 +490,42 @@ impl SettingsWindow {
         }
         self.stepper_edit = None;
         self.filter_edit = None;
+        self.script_edit = None;
         self.browser_edit = None;
         self.text_drag = Some(TextDrag { rect: box_rect });
         log::debug!("指令别名框聚焦: 指令 {index} 喵");
+        self.render();
+    }
+
+    /// 点击自定义指令脚本输入框喵
+    fn click_script_box(&mut self, box_rect: Rect, index: usize, lx: f32) {
+        let paint = self.box_paint();
+        let font = self.fonts.font(12.0);
+        let script = self
+            .state
+            .borrow()
+            .config
+            .search
+            .commands
+            .get(index)
+            .map(|c| c.script.clone())
+            .unwrap_or_default();
+        if matches!(&self.script_edit, Some((i, _)) if *i == index) {
+            if let Some((_, te)) = self.script_edit.as_mut() {
+                let caret = caret_from_x(&font, &paint, &te.text, box_rect.left + 8.0, lx);
+                te.begin_select(caret);
+            }
+        } else {
+            let mut te = TextEdit::new(script);
+            te.select_all();
+            self.script_edit = Some((index, te));
+        }
+        self.stepper_edit = None;
+        self.filter_edit = None;
+        self.command_edit = None;
+        self.browser_edit = None;
+        self.text_drag = Some(TextDrag { rect: box_rect });
+        log::debug!("指令脚本框聚焦: 指令 {index} 喵");
         self.render();
     }
 
@@ -506,6 +547,7 @@ impl SettingsWindow {
         self.stepper_edit = None;
         self.filter_edit = None;
         self.command_edit = None;
+        self.script_edit = None;
         self.text_drag = Some(TextDrag { rect: box_rect });
         log::debug!("自定义浏览器框聚焦喵");
         self.render();
@@ -653,6 +695,7 @@ impl SettingsWindow {
             | RowHit::StepperEdit(_)
             | RowHit::FilterInput(_)
             | RowHit::CommandAlias(_)
+            | RowHit::CommandScript(_)
             | RowHit::Input(_)
             | RowHit::ScrollThumb => {}
         }
@@ -664,9 +707,10 @@ impl SettingsWindow {
         self.stepper_edit = None;
         self.filter_edit = None;
         self.command_edit = None;
+        self.script_edit = None;
         self.browser_edit = None;
         self.text_drag = None;
-        self.hotkey_capture = false;
+        self.hotkey_capture = None;
     }
 
     // ---------------------------------------------------------------------
@@ -698,6 +742,10 @@ impl SettingsWindow {
             RowId::RenderBackend => {
                 self.recreate_renderer();
                 self.commands.borrow_mut().push_back(Command::RecreateRenderer);
+            }
+            // 扫描热键开关直接影响系统热键注册,同步重注册喵
+            RowId::ScanHotkeyEnabled => {
+                self.commands.borrow_mut().push_back(Command::ReapplyHotkey);
             }
             _ => {}
         }
@@ -850,26 +898,46 @@ impl SettingsWindow {
         }
     }
 
-    /// 切换指令的系统命令类型喵
+    /// 切换指令的系统命令类型喵(内置四类 ↔ 自定义 shell 指令五档轮换)喵
     fn cycle_command_kind(&mut self, index: usize) {
-        use crate::platform::SystemCommandKind as K;
         let mut state = self.state.borrow_mut();
         // 借用收在块内,取好展示名再持久化喵
         let title = {
             let Some(entry) = state.config.search.commands.get_mut(index) else {
                 return;
             };
-            entry.kind = match entry.kind {
-                K::Lock => K::Sleep,
-                K::Sleep => K::Shutdown,
-                K::Shutdown => K::Restart,
-                K::Restart => K::Lock,
-            };
+            entry.kind = entry.kind.cycle();
             entry.kind.title()
         };
         state.persist();
         log::info!("指令 {index} 类型 → {title} 喵");
         self.command_edit = None;
+        // 切到自定义档且脚本还是空的: 直接拉起脚本输入,少一次点击喵
+        let needs_script = state.config.search.commands.get(index).is_some_and(|e| {
+            e.kind == crate::platform::SystemCommandKind::Custom && e.script.is_empty()
+        });
+        drop(state);
+        self.script_edit = None;
+        if needs_script {
+            self.script_edit = Some((index, TextEdit::default()));
+            self.render();
+        }
+    }
+
+    /// 提交自定义指令脚本缓冲喵(原样保存,执行时再按配置的 shell 解释)喵
+    fn commit_script_edit(&mut self) {
+        let Some((index, te)) = self.script_edit.take() else {
+            return;
+        };
+        let mut state = self.state.borrow_mut();
+        let script = te.text.trim().to_string();
+        if let Some(entry) = state.config.search.commands.get_mut(index)
+            && entry.script != script
+        {
+            entry.script = script;
+            state.persist();
+            log::info!("指令 {index} 脚本已更新喵~");
+        }
     }
 
     /// 删除指令喵
@@ -881,6 +949,7 @@ impl SettingsWindow {
             log::info!("指令 {index} 已删除,剩余 {} 条喵", state.config.search.commands.len());
         }
         self.command_edit = None;
+        self.script_edit = None;
     }
 
     /// 提交自定义浏览器缓冲喵(空串 = 回到系统默认)喵
@@ -914,9 +983,9 @@ impl SettingsWindow {
     /// 按钮动作喵(数据行以外的动作型按钮)喵
     fn press_button(&mut self, id: RowId) {
         match id {
-            RowId::HotkeyRecord => {
+            RowId::HotkeyRecord | RowId::ScanHotkeyRecord => {
                 // 进入录制模式: 等待用户按下新的组合键(Esc 取消)喵
-                self.hotkey_capture = true;
+                self.hotkey_capture = Some(id);
                 log::info!("热键录制中,请按下新组合键喵~");
             }
             RowId::Reset => {
@@ -960,10 +1029,10 @@ impl SettingsWindow {
                     .config
                     .search
                     .commands
-                    .push(crate::app::config::CommandEntry {
-                        aliases: Vec::new(),
-                        kind: crate::platform::SystemCommandKind::Lock,
-                    });
+                    .push(crate::app::config::CommandEntry::builtin(
+                        Vec::new(),
+                        crate::platform::SystemCommandKind::Lock,
+                    ));
                 let count = state.config.search.commands.len();
                 state.persist();
                 log::info!("添加指令行,共 {count} 条喵");
@@ -971,6 +1040,7 @@ impl SettingsWindow {
                 self.stepper_edit = None;
                 self.filter_edit = None;
                 self.browser_edit = None;
+                self.script_edit = None;
                 self.command_edit = Some((count - 1, TextEdit::default()));
             }
             _ => {}
@@ -983,6 +1053,8 @@ impl SettingsWindow {
             self.commit_filter_edit();
         } else if self.command_edit.is_some() {
             self.commit_command_edit();
+        } else if self.script_edit.is_some() {
+            self.commit_script_edit();
         } else if self.browser_edit.is_some() {
             self.commit_browser_edit();
         } else if self.stepper_edit.is_some() {
@@ -1000,6 +1072,8 @@ impl SettingsWindow {
                     te.backspace();
                 } else if let Some((_, te)) = &mut self.command_edit {
                     te.backspace();
+                } else if let Some((_, te)) = &mut self.script_edit {
+                    te.backspace();
                 } else if let Some(te) = &mut self.browser_edit {
                     te.backspace();
                 }
@@ -1012,6 +1086,8 @@ impl SettingsWindow {
                 } else if let Some((_, te)) = &mut self.filter_edit {
                     te.delete();
                 } else if let Some((_, te)) = &mut self.command_edit {
+                    te.delete();
+                } else if let Some((_, te)) = &mut self.script_edit {
                     te.delete();
                 } else if let Some(te) = &mut self.browser_edit {
                     te.delete();
@@ -1028,6 +1104,7 @@ impl SettingsWindow {
                 self.stepper_edit = None;
                 self.filter_edit = None;
                 self.command_edit = None;
+                self.script_edit = None;
                 self.browser_edit = None;
                 self.render();
                 true
@@ -1052,6 +1129,12 @@ impl SettingsWindow {
             self.render();
             return;
         }
+        // 自定义指令脚本编辑喵
+        if let Some((_, te)) = &mut self.script_edit {
+            te.insert_char(ch);
+            self.render();
+            return;
+        }
         // 自定义浏览器编辑喵
         if let Some(te) = &mut self.browser_edit {
             te.insert_char(ch);
@@ -1070,13 +1153,17 @@ impl SettingsWindow {
     }
 
     fn on_key(&mut self, key: crate::platform::Key) {
-        // 三个文本输入框共用编辑按键逻辑,按优先级处理提交喵
+        // 各文本输入框共用编辑按键逻辑,按优先级处理提交喵
         if self.filter_edit.is_some() {
             self.edit_key(key, &mut |w| w.commit_filter_edit());
             return;
         }
         if self.command_edit.is_some() {
             self.edit_key(key, &mut |w| w.commit_command_edit());
+            return;
+        }
+        if self.script_edit.is_some() {
+            self.edit_key(key, &mut |w| w.commit_script_edit());
             return;
         }
         if self.browser_edit.is_some() {
@@ -1088,14 +1175,14 @@ impl SettingsWindow {
         }
     }
 
-    /// 热键录制: 收到按键组合时保存并通知重新注册喵
+    /// 热键录制: 收到按键组合时按录制目标保存并通知重新注册喵
     fn on_hotkey_chord(&mut self, modifiers: String, key: String) {
-        if !self.hotkey_capture {
+        let Some(slot) = self.hotkey_capture else {
             return;
-        }
+        };
         // Esc 取消录制喵
         if key == "esc" {
-            self.hotkey_capture = false;
+            self.hotkey_capture = None;
             log::debug!("热键录制已取消喵");
             self.render();
             return;
@@ -1107,14 +1194,19 @@ impl SettingsWindow {
         }
         {
             let mut state = self.state.borrow_mut();
-            state.config.hotkey.enabled = true;
-            state.config.hotkey.modifiers = modifiers.clone();
-            state.config.hotkey.key = key.clone();
+            let target = match slot {
+                RowId::HotkeyRecord => &mut state.config.hotkey,
+                _ => &mut state.config.scan_hotkey,
+            };
+            target.enabled = true;
+            target.modifiers = modifiers.clone();
+            target.key = key.clone();
             state.persist();
         }
-        self.hotkey_capture = false;
+        self.hotkey_capture = None;
         self.commands.borrow_mut().push_back(Command::ReapplyHotkey);
-        log::info!("全局热键已更新: {} + {} 喵", modifiers, key);
+        let what = if slot == RowId::HotkeyRecord { "呼出热键" } else { "扫描热键" };
+        log::info!("{what}已更新: {modifiers} + {key} 喵");
         self.render();
     }
 
@@ -1186,6 +1278,8 @@ impl WindowHandler for SettingsWindow {
                     te.end_select();
                 } else if let Some((_, te)) = &mut self.command_edit {
                     te.end_select();
+                } else if let Some((_, te)) = &mut self.script_edit {
+                    te.end_select();
                 } else if let Some(te) = &mut self.browser_edit {
                     te.end_select();
                 }
@@ -1209,7 +1303,10 @@ impl WindowHandler for SettingsWindow {
             }
             WindowEvent::Timer => self.tick(),
             WindowEvent::Close => self.hide(),
-            WindowEvent::Hotkey | WindowEvent::ContextMenu(..) | WindowEvent::IpcCommand(_) => {}
+            WindowEvent::Hotkey
+            | WindowEvent::ScanHotkey
+            | WindowEvent::ContextMenu(..)
+            | WindowEvent::IpcCommand(_) => {}
         }
     }
 }
@@ -1276,7 +1373,7 @@ fn collect_data_groups(cfg: &AppConfig) -> [Vec<(String, Vec<SettingsRow>)>; 3] 
 ///
 /// 纯函数无副作用,公开供快照渲染等离屏验证使用喵。
 /// 应用陈列 / 打标签已整体迁入应用管理中心,这里只留入口与过滤喵。
-pub fn build_pages(config: &AppConfig, hotkey_capture: bool) -> Vec<SettingsPage> {
+pub fn build_pages(config: &AppConfig, hotkey_capture: Option<RowId>) -> Vec<SettingsPage> {
     let mut data_pages = collect_data_groups(config);
 
     // ---- 常规页: 数据分组 + 特殊分组喵 ----
@@ -1284,11 +1381,11 @@ pub fn build_pages(config: &AppConfig, hotkey_capture: bool) -> Vec<SettingsPage
         .drain(..)
         .map(|(title, rows)| SettingsGroup { title, rows })
         .collect();
-    // 热键组: 数据行(开关)后追加录制按钮喵
+    // 热键组: 数据行(开关)后追加录制按钮喵(呼出/扫描各一路)喵
     if let Some(group) = general.iter_mut().find(|g| g.title == "热键") {
         group.rows.push(btn(
             RowId::HotkeyRecord,
-            if hotkey_capture {
+            if hotkey_capture == Some(RowId::HotkeyRecord) {
                 "按下新组合键··· (Esc 取消)".into()
             } else if config.hotkey.modifiers.is_empty() {
                 format!("重新录制热键 · {}", config.hotkey.key)
@@ -1296,6 +1393,17 @@ pub fn build_pages(config: &AppConfig, hotkey_capture: bool) -> Vec<SettingsPage
                 format!(
                     "重新录制热键 · {}+{}",
                     config.hotkey.modifiers, config.hotkey.key
+                )
+            },
+        ));
+        group.rows.push(btn(
+            RowId::ScanHotkeyRecord,
+            if hotkey_capture == Some(RowId::ScanHotkeyRecord) {
+                "按下新组合键··· (Esc 取消)".into()
+            } else {
+                format!(
+                    "录制扫描热键 · {}+{}",
+                    config.scan_hotkey.modifiers, config.scan_hotkey.key
                 )
             },
         ));
@@ -1312,6 +1420,7 @@ pub fn build_pages(config: &AppConfig, hotkey_capture: bool) -> Vec<SettingsPage
             },
         );
     }
+    // 指令模块组: 数据组的 Shell 选择行在前,指令卡片在后,合并成同一组喵
     let mut command_rows: Vec<SettingsRow> = config
         .search
         .commands
@@ -1321,13 +1430,18 @@ pub fn build_pages(config: &AppConfig, hotkey_capture: bool) -> Vec<SettingsPage
             index: i,
             kind: c.kind,
             aliases: c.aliases.join(", "),
+            script: c.script.clone(),
         })
         .collect();
     command_rows.push(btn(RowId::CommandAdd, "添加指令".into()));
-    general.push(SettingsGroup {
-        title: "指令模块".into(),
-        rows: command_rows,
-    });
+    if let Some(group) = general.iter_mut().find(|g| g.title == "指令模块") {
+        group.rows.extend(command_rows);
+    } else {
+        general.push(SettingsGroup {
+            title: "指令模块".into(),
+            rows: command_rows,
+        });
+    }
     general.push(SettingsGroup {
         title: "维护".into(),
         rows: vec![btn(RowId::Reset, "恢复默认设置".into())],

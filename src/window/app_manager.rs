@@ -66,6 +66,8 @@ pub struct AppManagerWindow {
     pixels: Vec<u8>,
     /// 当前选中的应用名喵
     selected: Option<String>,
+    /// 过滤词喵(独立持久,点击别处不会丢;编辑态草稿另存 filter_edit)喵
+    filter_text: String,
     /// 过滤词草稿喵
     filter_edit: Option<TextEdit>,
     /// 名称编辑草稿喵
@@ -164,6 +166,7 @@ impl AppManagerWindow {
             scale,
             pixels: Vec::new(),
             selected: None,
+            filter_text: String::new(),
             filter_edit: None,
             name_edit: None,
             path_edit: None,
@@ -211,6 +214,7 @@ impl AppManagerWindow {
         self.commit_path_edit();
         self.commit_icon_edit();
         self.commit_tag_edit();
+        self.commit_filter_edit();
         self.visible = false;
         self.state.borrow_mut().manager_visible = false;
         self.platform.show_window(&self.window, false);
@@ -222,7 +226,12 @@ impl AppManagerWindow {
 
     /// 过滤后的应用列表喵(按拼音首字母排序,便于翻找)喵
     fn filtered_apps(&self) -> Vec<AppInfo> {
-        let kw = self.filter_edit.as_ref().map(|t| t.text.trim()).unwrap_or("");
+        // 编辑中优先取草稿,否则用已提交的过滤词喵
+        let kw = self
+            .filter_edit
+            .as_ref()
+            .map(|t| t.text.trim())
+            .unwrap_or(self.filter_text.trim());
         let kw_lower = kw.to_lowercase();
         let state = self.state.borrow();
         let mut apps: Vec<AppInfo> = state
@@ -238,6 +247,26 @@ impl AppManagerWindow {
             .collect();
         apps.sort_by_key(|a| crate::search::to_pinyin_initials(&a.name).to_uppercase());
         apps
+    }
+
+    /// 提交过滤词草稿喵(写回持久字段,文本不因点击别处而丢)喵
+    ///
+    /// 过滤词变化时把列表滚回顶部——结果集变了,旧视口位置多半已悬空喵。
+    /// 返回过滤词是否发生变化喵。
+    fn commit_filter_edit(&mut self) -> bool {
+        let Some(te) = self.filter_edit.take() else {
+            return false;
+        };
+        let text = te.text.trim().to_string();
+        let changed = text != self.filter_text;
+        if changed {
+            log::debug!("过滤词更新: {:?} → {:?} 喵", self.filter_text, text);
+            self.filter_text = text;
+            // 视口回到顶部: 搜索结果的排列高度未必够到旧滚动位置喵
+            self.scroll = 0.0;
+            self.scroll_target = 0.0;
+        }
+        changed
     }
 
     /// 取已缓存的图标喵(缺失时后台提取,不阻塞渲染)喵
@@ -290,6 +319,8 @@ impl AppManagerWindow {
             tag: self.tag_edit.as_ref(),
             block: self.block_edit.as_ref(),
         };
+        // 过滤框静态展示文本喵(非编辑态显示已提交的过滤词)喵
+        let filter_shown = self.filter_text.clone();
         // 屏蔽词展示串喵(与配置 GUI 同一份规则,这里只读关键词)喵
         let block_words: Vec<String> = self
             .state
@@ -319,6 +350,7 @@ impl AppManagerWindow {
             grid,
             self.scroll,
             edits,
+            &filter_shown,
             &block_words,
             &mut icon_fn,
             MANAGER_WIDTH,
@@ -549,7 +581,8 @@ impl AppManagerWindow {
                 self.render();
             }
             Key::Enter => {
-                // 过滤词回车 = 只是收起光标,其余提交喵
+                // 过滤词回车 = 提交并收起光标,其余提交喵
+                self.commit_filter_edit();
                 if self.tag_edit.is_some() {
                     self.commit_tag_edit();
                 }
@@ -563,6 +596,7 @@ impl AppManagerWindow {
             }
             Key::Escape => {
                 if self.editing() {
+                    // 过滤词草稿丢弃回已提交值;其余草稿直接放弃喵
                     self.filter_edit = None;
                     self.name_edit = None;
                     self.path_edit = None;
@@ -584,6 +618,9 @@ impl AppManagerWindow {
         }
         if let Some(te) = &mut self.filter_edit {
             te.insert_char(ch);
+            // 过滤词实时生效: 列表变了,视口回顶,免得结果被旧滚动位置甩出视野喵
+            self.scroll = 0.0;
+            self.scroll_target = 0.0;
         } else if let Some(te) = &mut self.name_edit {
             te.insert_char(ch);
         } else if let Some(te) = &mut self.path_edit {
@@ -619,6 +656,7 @@ impl AppManagerWindow {
             .map(|(r, h)| (*r, *h));
 
         // 与配置 GUI 统一: 点在输入框外,挂起的草稿立即提交,焦点随点击离开喵
+        // (过滤词提交后持久保留,列表保持过滤结果——就是搜索体验的另一半喵)
         let on_input = matches!(
             &hit,
             Some((_, ManagerHit::FilterInput))
@@ -630,7 +668,7 @@ impl AppManagerWindow {
             self.commit_path_edit();
             self.commit_icon_edit();
             self.commit_tag_edit();
-            self.filter_edit = None;
+            self.commit_filter_edit();
             self.block_edit = None;
         }
 
@@ -758,7 +796,7 @@ impl AppManagerWindow {
         log::info!("管理中心已发起应用重扫描喵~");
     }
 
-    /// 点击过滤框喵
+    /// 点击过滤框喵(从已提交的过滤词继续编辑,点击别处不丢文本)喵
     fn click_filter_input(&mut self, rect: Rect, lx: f32) {
         if self.filter_edit.is_some() {
             let paint = self.box_paint();
@@ -768,7 +806,7 @@ impl AppManagerWindow {
                 te.begin_select(caret);
             }
         } else {
-            self.filter_edit = Some(TextEdit::default());
+            self.filter_edit = Some(TextEdit::new(self.filter_text.clone()));
         }
         // 详情编辑槽让位喵(先提交,避免丢改动)喵
         self.commit_name_edit();
@@ -890,7 +928,16 @@ impl AppManagerWindow {
     }
 
     /// 推进滚动平滑动效,返回是否仍在动喵
+    ///
+    /// 每帧把目标钳回内容范围内: 过滤/删除让内容变矮时,
+    /// 旧的滚动目标会悬空,表现为「看不到结果」,这里统一兜底喵。
     fn step_anim(&mut self) -> bool {
+        let max = self
+            .layout
+            .as_ref()
+            .map(|l| (l.list_content_height - l.list_rect.height()).max(0.0))
+            .unwrap_or(0.0);
+        self.scroll_target = self.scroll_target.clamp(0.0, max);
         let delta = self.scroll_target - self.scroll;
         if delta.abs() > 0.5 {
             self.scroll += delta * SCROLL_EASE;
@@ -941,8 +988,13 @@ impl AppManagerWindow {
                 }
                 BgEvent::Scanned(apps) => {
                     self.scanning = false;
-                    let added = self.state.borrow_mut().merge_scanned(apps);
-                    log::info!("管理中心重扫描完成,新增 {added} 个应用喵");
+                    let delta = self.state.borrow_mut().merge_scanned(apps);
+                    log::info!("管理中心重扫描完成,{} 喵", delta.summary());
+                    // 增减有变化就系统通知一声(与热键/托盘触发的扫描同一反馈通道)喵
+                    if delta.any() {
+                        self.platform
+                            .show_notification("应用扫描完成", &delta.summary());
+                    }
                     if self.visible {
                         self.render();
                     }
@@ -1020,6 +1072,7 @@ impl WindowHandler for AppManagerWindow {
             WindowEvent::Timer => self.tick(),
             WindowEvent::Close => self.hide(),
             WindowEvent::Hotkey
+            | WindowEvent::ScanHotkey
             | WindowEvent::HotkeyChord { .. }
             | WindowEvent::ImePreedit(_)
             | WindowEvent::ContextMenu(..)

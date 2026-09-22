@@ -22,7 +22,12 @@ fn main() {
     let _ = std::fs::create_dir_all(out_dir);
 
     // 典型配置 + 一批注册应用喵
-    let config = AppConfig::default();
+    let mut config = AppConfig::default();
+    // 塞一条自定义指令,让指令卡片的 Custom 档(带脚本输入框)进快照喵
+    config.search.commands.push(meow_app_launcher::app::config::CommandEntry::custom(
+        vec!["清DNS".into()],
+        "ipconfig /flushdns",
+    ));
     let apps: Vec<AppInfo> = ["喵喵终端", "Rust Rover", "Visual Studio Code", "Firefox", "微信", "QQ音乐"]
         .iter()
         .enumerate()
@@ -37,7 +42,7 @@ fn main() {
     let fonts = FontCache::new();
     let scale = 2.0f32; // 200% DPI 喵
 
-    let pages = build_pages(&config, false);
+    let pages = build_pages(&config, None);
     let dirty: Vec<_> = meow_app_launcher::window::settings_data::dirty_data_ids(&config);
 
     // 浅色(默认)与深色主题各出一组配置页快照喵
@@ -46,7 +51,7 @@ fn main() {
         ("dark", SettingsTheme::for_preset(ThemePreset::Dark)),
     ];
     for (theme_name, theme) in themes {
-    for (page_idx, scroll) in [(0usize, 0.0f32), (0, 320.0), (1, 0.0), (3, 0.0)] {
+    for (page_idx, scroll) in [(0usize, 0.0f32), (0, 320.0), (0, 1250.0), (1, 0.0), (3, 0.0)] {
         let (w, h) = (SETTINGS_WIDTH, SETTINGS_HEIGHT);
         let mut surface = surfaces::raster_n32_premul(((w * scale) as i32, (h * scale) as i32)).unwrap();
         let canvas = surface.canvas();
@@ -61,7 +66,7 @@ fn main() {
             scroll,
             1.0,
             Default::default(),
-            false,
+            None,
             &dirty,
             w,
             h,
@@ -93,6 +98,7 @@ fn main() {
                 grid,
                 0.0,
                 ManagerEdits::default(),
+                "",
                 &["卸载".to_string(), "uninstall".to_string()],
                 &mut icon_of,
                 MANAGER_WIDTH,
